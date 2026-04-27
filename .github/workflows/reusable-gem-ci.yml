@@ -85,17 +85,17 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
+        uses: ruby/setup-ruby@7372622e62b60b3cb750dcd2b9e32c247ffec26a # v1.302.0
         with:
           ruby-version: ${{ inputs.lint-ruby-version }}
           bundler-cache: true
 
       - name: Restore lint cache
         if: ${{ inputs.lint-cache-paths != '' && inputs.lint-cache-key != '' }}
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: ${{ inputs.lint-cache-paths }}
           key: ${{ inputs.lint-cache-key }}
@@ -132,10 +132,10 @@ jobs:
           sudo apt-get install --no-install-recommends -y $APT_PACKAGES
 
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
+        uses: ruby/setup-ruby@7372622e62b60b3cb750dcd2b9e32c247ffec26a # v1.302.0
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
@@ -158,7 +158,7 @@ jobs:
 
       - name: Keep screenshots from failed system tests
         if: ${{ failure() && inputs.upload-screenshots }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: screenshots-${{ matrix.ruby }}
           path: ${{ github.workspace }}/tmp/screenshots
