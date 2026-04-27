@@ -42,6 +42,19 @@ on:
         required: false
         type: string
         default: 'CHANGELOG.md'
+      sibling-checkouts:
+        description: |
+          JSON array of sibling repositories to clone before `bundle install`
+          in the publish job. Each entry is an object with `repo`
+          (`<owner>/<name>`), `path` (filesystem path relative to the gem
+          checkout, typically `../<name>`), and optional `ref` (branch, tag,
+          or SHA; defaults to the repository's default branch). Used by gems
+          whose Gemfile resolves a `path:` dependency on a sibling repo, so
+          `bundler-cache: true` can resolve before publish. Defaults to `[]`
+          (no sibling checkouts).
+        required: false
+        type: string
+        default: '[]'
 
 jobs:
   release:
@@ -132,6 +145,29 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Clone sibling repositories
+        if: ${{ inputs.sibling-checkouts != '' && inputs.sibling-checkouts != '[]' }}
+        env:
+          SIBLING_CHECKOUTS: ${{ inputs.sibling-checkouts }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Validate JSON and iterate. Each entry: { "repo": "owner/name", "path": "../name", "ref": "optional" }
+          count=$(echo "$SIBLING_CHECKOUTS" | jq 'length')
+          for i in $(seq 0 $((count - 1))); do
+            repo=$(echo "$SIBLING_CHECKOUTS" | jq -r ".[$i].repo")
+            path=$(echo "$SIBLING_CHECKOUTS" | jq -r ".[$i].path")
+            ref=$(echo "$SIBLING_CHECKOUTS" | jq -r ".[$i].ref // empty")
+            if [ -z "$repo" ] || [ "$repo" = "null" ] || [ -z "$path" ] || [ "$path" = "null" ]; then
+              echo "::error::sibling-checkouts entry $i missing required 'repo' or 'path'"
+              exit 1
+            fi
+            echo "Cloning $repo into $path${ref:+ @ $ref}"
+            git clone --depth 1 ${ref:+--branch "$ref"} \
+              "https://x-access-token:${GH_TOKEN}@github.com/${repo}.git" \
+              "$path"
+          done
 
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1

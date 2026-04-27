@@ -16,14 +16,25 @@ on:
   workflow_call:
     inputs:
       ruby-versions:
-        description: 'JSON array string of Ruby versions for the test matrix, e.g. ''["4.0.0","4.0.3"]''.'
-        required: true
+        description: 'JSON array string of Ruby versions for the test matrix, e.g. ''["4.0.0","4.0.3"]''. When omitted or set to ''[]'', the test job is skipped (lint-only).'
+        required: false
         type: string
+        default: '[]'
       lint-ruby-version:
         description: 'Ruby version used for the lint job.'
         required: false
         type: string
         default: '4.0.3'
+      lint-cache-paths:
+        description: 'Multiline string of paths to cache around the primary lint command (e.g. RuboCop result cache). When set together with lint-cache-key, wraps the lint step with actions/cache.'
+        required: false
+        type: string
+        default: ''
+      lint-cache-key:
+        description: 'Cache key for lint-cache-paths. Required when lint-cache-paths is set; ignored otherwise.'
+        required: false
+        type: string
+        default: ''
       apt-packages:
         description: 'Space-separated apt packages to install before bundle/test (e.g. "google-chrome-stable libyaml-dev").'
         required: false
@@ -82,6 +93,13 @@ jobs:
           ruby-version: ${{ inputs.lint-ruby-version }}
           bundler-cache: true
 
+      - name: Restore lint cache
+        if: ${{ inputs.lint-cache-paths != '' && inputs.lint-cache-key != '' }}
+        uses: actions/cache@v5
+        with:
+          path: ${{ inputs.lint-cache-paths }}
+          key: ${{ inputs.lint-cache-key }}
+
       - name: Lint code for consistent style
         run: ${{ inputs.lint-command }}
 
@@ -95,6 +113,7 @@ jobs:
           RAREBIT_EXTRA_LINT_EOF
 
   test:
+    if: ${{ inputs.ruby-versions != '' && inputs.ruby-versions != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:

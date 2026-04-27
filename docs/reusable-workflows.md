@@ -19,8 +19,10 @@ Two-job CI workflow (`lint` + `test`) for Ruby gems. Replaces the per-gem
 
 | Input                | Type    | Required | Default                          | Description |
 |----------------------|---------|----------|----------------------------------|-------------|
-| `ruby-versions`      | string  | yes      | —                                | JSON array of Ruby versions for the test matrix, e.g. `'["4.0.0","4.0.3"]'`. |
+| `ruby-versions`      | string  | no       | `"[]"`                           | JSON array of Ruby versions for the test matrix, e.g. `'["4.0.0","4.0.3"]'`. When omitted or `'[]'`, the test job is skipped (lint-only). |
 | `lint-ruby-version`  | string  | no       | `"4.0.3"`                        | Ruby version used for the lint job. |
+| `lint-cache-paths`   | string  | no       | `""`                             | Multiline list of filesystem paths to cache around the lint command (e.g. RuboCop result cache). When set together with `lint-cache-key`, wraps the lint step with `actions/cache@v5`. |
+| `lint-cache-key`     | string  | no       | `""`                             | Cache key paired with `lint-cache-paths`. Required when `lint-cache-paths` is set; ignored otherwise. |
 | `apt-packages`       | string  | no       | `""`                             | Space-separated apt packages installed before the test job. |
 | `pre-test-commands`  | string  | no       | `""`                             | Multiline shell run before the test command (db setup, asset build). |
 | `test-command`       | string  | no       | `bundle exec rspec`              | Command run by the test job. |
@@ -80,6 +82,29 @@ jobs:
       upload-screenshots: true
 ```
 
+### Example — lint-only with RuboCop cache
+
+When a gem only needs lint coverage in CI (no test matrix), omit
+`ruby-versions` to skip the test job. Pair `lint-cache-paths` and
+`lint-cache-key` to persist RuboCop's incremental result cache across runs.
+
+```yaml
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    uses: rarebit-one/.github/.github/workflows/reusable-gem-ci.yml@v1
+    with:
+      lint-cache-paths: |
+        ~/.cache/rubocop_cache
+      lint-cache-key: rubocop-${{ runner.os }}-${{ hashFiles('.rubocop.yml', 'Gemfile.lock') }}
+```
+
 ## `reusable-gem-release.yml`
 
 Two-job release workflow (`release` + `publish`) triggered on `v*` tags.
@@ -88,12 +113,13 @@ GitHub Release, and publishes to RubyGems via OIDC trusted publishing.
 
 ### Inputs
 
-| Input            | Type   | Required | Default                          | Description |
-|------------------|--------|----------|----------------------------------|-------------|
-| `gem-name`       | string | yes      | —                                | Gem name (matches `spec.name`). Also used to derive the default version-file path. |
-| `ruby-version`   | string | no       | `"4.0.3"`                        | Ruby used for verification and publish. |
-| `version-file`   | string | no       | `lib/<gem-name>/version.rb` (with `-` → `/`) | Override the version file location. |
-| `changelog-path` | string | no       | `CHANGELOG.md`                   | Path to the changelog file. |
+| Input               | Type   | Required | Default                          | Description |
+|---------------------|--------|----------|----------------------------------|-------------|
+| `gem-name`          | string | yes      | —                                | Gem name (matches `spec.name`). Also used to derive the default version-file path. |
+| `ruby-version`      | string | no       | `"4.0.3"`                        | Ruby used for verification and publish. |
+| `version-file`      | string | no       | `lib/<gem-name>/version.rb` (with `-` → `/`) | Override the version file location. |
+| `changelog-path`    | string | no       | `CHANGELOG.md`                   | Path to the changelog file. |
+| `sibling-checkouts` | string | no       | `"[]"`                           | JSON array of sibling repos to clone before `bundle install` in the publish job. Each entry: `{"repo": "owner/name", "path": "../name", "ref": "optional"}`. Used by gems whose Gemfile resolves a `path:` dependency on a sibling repo so `bundler-cache: true` can resolve. Authentication uses the workflow's `GITHUB_TOKEN`; sibling repos must be readable by it. |
 
 ### Behavior
 
@@ -120,6 +146,29 @@ jobs:
     uses: rarebit-one/.github/.github/workflows/reusable-gem-release.yml@v1
     with:
       gem-name: standard_id
+```
+
+### Example — gem with a sibling-repo path dependency
+
+When a gem's `Gemfile` resolves a `path:` dependency on a sibling repo (e.g.
+`ground_control-inertia` → `../ground_control-api`), declare the sibling so the
+publish job can clone it before `bundle install`.
+
+```yaml
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    uses: rarebit-one/.github/.github/workflows/reusable-gem-release.yml@v1
+    with:
+      gem-name: ground_control-inertia
+      sibling-checkouts: |
+        [{"repo": "rarebit-one/ground_control-api", "path": "../ground_control-api"}]
 ```
 
 ## `reusable-weekly-maintenance.yml`
