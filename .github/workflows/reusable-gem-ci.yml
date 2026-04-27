@@ -112,7 +112,7 @@ jobs:
           ${{ inputs.extra-lint-commands }}
           RAREBIT_EXTRA_LINT_EOF
 
-  test:
+  test-matrix:
     if: ${{ inputs.ruby-versions != '' && inputs.ruby-versions != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -163,3 +163,33 @@ jobs:
           name: screenshots-${{ matrix.ruby }}
           path: ${{ github.workspace }}/tmp/screenshots
           if-no-files-found: ignore
+
+  # Aggregator that fans the matrix into a single check named `test`.
+  # Branch protection on consumer repos can require `<caller-job> / test`
+  # without enumerating every Ruby leg, so adding/removing a Ruby version
+  # in `ruby-versions` doesn't require updating protection in each repo.
+  test:
+    needs: test-matrix
+    # Run regardless of test-matrix result so a failing leg fails this
+    # aggregator instead of skipping it. GitHub branch protection treats
+    # skipped checks as passing — without `if: always()`, a failing
+    # matrix leg would skip this job and silently satisfy the required
+    # check. `success` and `skipped` (lint-only mode) both count as
+    # passing; anything else fails the aggregator.
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Check matrix result
+        env:
+          MATRIX_RESULT: ${{ needs.test-matrix.result }}
+        run: |
+          case "$MATRIX_RESULT" in
+            success|skipped)
+              echo "test-matrix: $MATRIX_RESULT"
+              ;;
+            *)
+              echo "test-matrix failed: $MATRIX_RESULT"
+              exit 1
+              ;;
+          esac
