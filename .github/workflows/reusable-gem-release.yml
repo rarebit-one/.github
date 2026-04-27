@@ -1,0 +1,143 @@
+name: Reusable Gem Release
+
+# Reusable Release workflow for Ruby gems in the rarebit-one organization.
+#
+# Consumers reference this with:
+#
+#   on:
+#     push:
+#       tags:
+#         - "v*"
+#
+#   jobs:
+#     release:
+#       uses: rarebit-one/.github/.github/workflows/reusable-gem-release.yml@v1
+#       with:
+#         gem-name: standard_id
+#       permissions:
+#         contents: write
+#         id-token: write
+#
+# See docs/reusable-workflows.md for the full input contract.
+
+on:
+  workflow_call:
+    inputs:
+      gem-name:
+        description: 'The gem name (matches spec.name in the gemspec).'
+        required: true
+        type: string
+      ruby-version:
+        description: 'Ruby version used to verify the tag and publish to RubyGems.'
+        required: false
+        type: string
+        default: '4.0.3'
+      version-file:
+        description: 'Path to the file containing VERSION. Defaults to lib/<gem-name>/version.rb.'
+        required: false
+        type: string
+        default: ''
+      changelog-path:
+        description: 'Path to the CHANGELOG file used to extract release notes.'
+        required: false
+        type: string
+        default: 'CHANGELOG.md'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ inputs.ruby-version }}
+
+      - name: Verify tag matches gem version
+        env:
+          GEM_NAME: ${{ inputs.gem-name }}
+          VERSION_FILE_INPUT: ${{ inputs.version-file }}
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+
+          # The gemspec sources its version from lib/<gem-name>/version.rb, so
+          # this check transitively validates that file. Loading the gemspec
+          # here is the same approach each gem's standalone release.yml uses.
+          gem_version=$(ruby -e "spec = Gem::Specification.load(Dir['*.gemspec'].first); puts spec.version")
+          if [ "$tag_version" != "$gem_version" ]; then
+            echo "::error::Tag version ($tag_version) does not match gemspec version ($gem_version)"
+            exit 1
+          fi
+
+          # Confirm the version file exists at the expected path so a missing
+          # or moved file is surfaced before publish rather than at gem build.
+          version_file="${VERSION_FILE_INPUT}"
+          if [ -z "$version_file" ]; then
+            # Convert e.g. standard_id-apple -> lib/standard_id/apple/version.rb
+            version_file="lib/${GEM_NAME//-//}/version.rb"
+          fi
+          if [ ! -f "$version_file" ]; then
+            echo "::warning::Version file not found at $version_file (gemspec version still passed)"
+          fi
+
+      - name: Extract changelog entry
+        id: changelog
+        env:
+          CHANGELOG_PATH: ${{ inputs.changelog-path }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          notes=$(awk -v ver="$version" '
+            /^## \[/ {
+              if (found) exit
+              if ($0 ~ "^## \\[" ver "\\]") found=1
+              next
+            }
+            found { print }
+          ' "$CHANGELOG_PATH")
+
+          if [ -z "$notes" ]; then
+            echo "::error::No ${CHANGELOG_PATH} entry found for version $version"
+            exit 1
+          fi
+
+          # Use a random delimiter to prevent injection via changelog content
+          delimiter="EOF_$(openssl rand -hex 8)"
+          {
+            echo "notes<<${delimiter}"
+            echo "$notes"
+            echo "${delimiter}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_NOTES: ${{ steps.changelog.outputs.notes }}
+        run: |
+          printf "%s" "$RELEASE_NOTES" > /tmp/release_notes.txt
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file /tmp/release_notes.txt
+
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: rubygems
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ inputs.ruby-version }}
+          bundler-cache: true
+
+      - name: Push to RubyGems
+        uses: rubygems/release-gem@6317d8d1f7e28c24d28f6eff169ea854948bd9f7 # v1.2.0

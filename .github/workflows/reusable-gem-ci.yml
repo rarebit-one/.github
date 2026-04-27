@@ -1,0 +1,146 @@
+name: Reusable Gem CI
+
+# Reusable CI workflow for Ruby gems in the rarebit-one organization.
+#
+# Consumers reference this with:
+#
+#   jobs:
+#     ci:
+#       uses: rarebit-one/.github/.github/workflows/reusable-gem-ci.yml@v1
+#       with:
+#         ruby-versions: '["4.0.3"]'
+#
+# See docs/reusable-workflows.md for the full input contract.
+
+on:
+  workflow_call:
+    inputs:
+      ruby-versions:
+        description: 'JSON array string of Ruby versions for the test matrix, e.g. ''["4.0.0","4.0.3"]''.'
+        required: true
+        type: string
+      lint-ruby-version:
+        description: 'Ruby version used for the lint job.'
+        required: false
+        type: string
+        default: '4.0.3'
+      apt-packages:
+        description: 'Space-separated apt packages to install before bundle/test (e.g. "google-chrome-stable libyaml-dev").'
+        required: false
+        type: string
+        default: ''
+      pre-test-commands:
+        description: 'Multiline shell commands to run before the test command (e.g. db setup, asset build).'
+        required: false
+        type: string
+        default: ''
+      test-command:
+        description: 'Command used by the test job.'
+        required: false
+        type: string
+        default: 'bundle exec rspec'
+      lint-command:
+        description: 'Primary lint command (rubocop by default).'
+        required: false
+        type: string
+        default: 'bundle exec rubocop -f github'
+      extra-lint-commands:
+        description: 'Multiline shell commands to run after the primary lint command (brakeman, bundler-audit, etc.).'
+        required: false
+        type: string
+        default: ''
+      upload-screenshots:
+        description: 'When true, upload tmp/screenshots/ as an artifact on test failure.'
+        required: false
+        type: boolean
+        default: false
+      concurrency-group:
+        description: 'Optional override for the workflow concurrency group. When empty, a sensible default is used by consumers.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ inputs.concurrency-group != '' && inputs.concurrency-group || format('{0}-{1}', github.workflow, github.event.pull_request.number || github.ref) }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ inputs.lint-ruby-version }}
+          bundler-cache: true
+
+      - name: Lint code for consistent style
+        run: ${{ inputs.lint-command }}
+
+      - name: Run extra lint commands
+        if: ${{ inputs.extra-lint-commands != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat <<'RAREBIT_EXTRA_LINT_EOF' | bash -euo pipefail
+          ${{ inputs.extra-lint-commands }}
+          RAREBIT_EXTRA_LINT_EOF
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ${{ fromJSON(inputs.ruby-versions) }}
+    name: Ruby ${{ matrix.ruby }}
+    steps:
+      - name: Install apt packages
+        if: ${{ inputs.apt-packages != '' }}
+        env:
+          APT_PACKAGES: ${{ inputs.apt-packages }}
+        run: |
+          sudo apt-get update
+          # shellcheck disable=SC2086
+          sudo apt-get install --no-install-recommends -y $APT_PACKAGES
+
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+
+      - name: Run pre-test commands
+        if: ${{ inputs.pre-test-commands != '' }}
+        shell: bash
+        env:
+          RAILS_ENV: test
+        run: |
+          set -euo pipefail
+          cat <<'RAREBIT_PRE_TEST_EOF' | bash -euo pipefail
+          ${{ inputs.pre-test-commands }}
+          RAREBIT_PRE_TEST_EOF
+
+      - name: Run tests
+        env:
+          RAILS_ENV: test
+        run: ${{ inputs.test-command }}
+
+      - name: Keep screenshots from failed system tests
+        if: ${{ failure() && inputs.upload-screenshots }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: screenshots-${{ matrix.ruby }}
+          path: ${{ github.workspace }}/tmp/screenshots
+          if-no-files-found: ignore
