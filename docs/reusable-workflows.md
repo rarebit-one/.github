@@ -12,8 +12,19 @@ a stable contract.
 
 ## `reusable-gem-ci.yml`
 
-Two-job CI workflow (`lint` + `test`) for Ruby gems. Replaces the per-gem
-`.github/workflows/ci.yml` files.
+CI workflow for Ruby gems with three jobs: `lint`, `test-matrix` (one
+leg per Ruby version, displays as `Ruby <version>`), and `test` (an
+aggregator that depends on `test-matrix` and emits a single rolled-up
+`test` check). Replaces the per-gem `.github/workflows/ci.yml` files.
+
+Branch protection on consumer repos can require `<caller-job> / lint`
+and `<caller-job> / test` without enumerating every Ruby leg, so adding
+or removing a Ruby version doesn't require updating protection. The
+aggregator is safe to require unconditionally: it runs with
+`if: always()` and explicitly fails when any matrix leg fails (rather
+than skipping, which GitHub branch protection would treat as passing).
+In lint-only mode (`ruby-versions: '[]'`), the aggregator passes
+because the matrix is intentionally skipped.
 
 ### Inputs
 
@@ -33,10 +44,14 @@ Two-job CI workflow (`lint` + `test`) for Ruby gems. Replaces the per-gem
 
 ### Behavior
 
-- Both jobs run on `ubuntu-latest`.
+- All jobs run on `ubuntu-latest`.
 - `actions/checkout@v6`, `ruby/setup-ruby@v1` (with `bundler-cache: true`),
   `actions/upload-artifact@v7`.
 - Test matrix has `fail-fast: false`.
+- The `test` aggregator runs with `if: always()` and inspects
+  `needs.test-matrix.result`: `success` and `skipped` (lint-only) pass,
+  anything else fails. Safe to require unconditionally in branch
+  protection.
 - Default concurrency cancels in-progress runs scoped to the PR or ref.
 - Permissions: `contents: read`, `pull-requests: read`.
 
