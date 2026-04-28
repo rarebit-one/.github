@@ -55,6 +55,9 @@ Ruby gems in this org publish via the shared
 workflow. Tag a release as `vX.Y.Z` from `main` and the workflow handles
 verification, GitHub Release creation, and RubyGems publish.
 
+For non-gem repos (web apps, Node libraries, etc.), see the repo's own
+`README.md` or `CLAUDE.md` for the release / deploy flow.
+
 ## Security
 
 If you discover a security vulnerability, see [SECURITY.md](SECURITY.md) — please
