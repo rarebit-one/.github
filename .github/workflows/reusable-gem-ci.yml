@@ -120,7 +120,13 @@ jobs:
       fail-fast: false
       matrix:
         ruby: ${{ fromJSON(inputs.ruby-versions) }}
-    name: Ruby ${{ matrix.ruby }}
+    # No explicit `name:` here — when ruby-versions is empty (lint-only mode),
+    # GitHub still posts a placeholder status check for the matrix job, and an
+    # explicit `name: Ruby ${{ matrix.ruby }}` would publish that placeholder
+    # with the literal unsubstituted template. Falling back to GitHub's default
+    # naming (`{job-id} ({matrix-values})`) renders cleanly in both modes:
+    # populated matrix → `test-matrix (4.0.0)` etc.; empty matrix → just
+    # `test-matrix` SKIPPED.
     steps:
       - name: Install apt packages
         if: ${{ inputs.apt-packages != '' }}
