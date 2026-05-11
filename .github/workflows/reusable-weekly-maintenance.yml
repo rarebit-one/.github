@@ -495,7 +495,7 @@ jobs:
 
       - name: Weekly maintenance
         id: maintenance
-        uses: anthropics/claude-code-action@63322d7b2bc79e7b621b89f41b53ceb8e5a5d314 # v1
+        uses: anthropics/claude-code-action@476e359e6203e73dad705c8b322e333fabbd7416 # v1
         timeout-minutes: ${{ inputs.claude-timeout-minutes }}
         env:
           LINEAR_API_KEY: ${{ secrets.linear-api-key }}
