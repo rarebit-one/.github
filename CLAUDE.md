@@ -2,9 +2,9 @@
 
 This is the rarebit-one **org-level** `.github` repo. It hosts shared reusable GitHub Actions workflows referenced by every gem and app in the workspace.
 
-## Worktree-Only Workflow (Enforced)
+## Worktree-Only Workflow
 
-**All file modifications are blocked in the main checkout.** A PreToolUse hook (`enforce-worktree.sh`) rejects Edit, Write, and NotebookEdit operations targeting files outside a worktree. There are no opt-outs.
+**Convention:** make all file modifications inside a worktree, not the main checkout. When Claude Code is started from the rarebit-one workspace root (this repo's parent), a workspace-level PreToolUse hook (`<workspace>/.claude/hooks/enforce-worktree.sh`) blocks `Edit`/`Write`/`NotebookEdit` outside `.worktrees/<name>/`. This repo has no per-repo `.claude/` config, so when launching Claude Code directly in this directory the enforcement is by convention only.
 
 Before writing any code, create a worktree:
 
@@ -23,7 +23,7 @@ Then work inside `.worktrees/<name>/` for the rest of the session.
 - `.github/workflows/claude-agent.yml` — issue-triggered Claude PR agent
 - `.github/workflows/claude-code-review.yml` — PR-triggered Claude review bot
 - `.github/workflows/codeql-actions.yml` — CodeQL scanning for the Actions language
-- `.github/workflows/gem-release.yml`, `pr.yml`, `deploy-production.yml`, `sentry-release.yml` — callers/dispatchers
+- `.github/workflows/pr.yml`, `deploy-production.yml`, `sentry-release.yml` — callers/dispatchers
 
 See `docs/reusable-workflows.md` for the full input/output contract of each reusable workflow.
 
