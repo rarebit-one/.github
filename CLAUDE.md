@@ -4,7 +4,7 @@ This is the rarebit-one **org-level** `.github` repo. It hosts shared reusable G
 
 ## Worktree-Only Workflow (Enforced)
 
-**All file modifications are blocked in the main checkout.** A PreToolUse hook (`.claude/hooks/enforce-worktree.sh`, registered in `.claude/settings.json`) rejects Edit, Write, and NotebookEdit operations targeting files outside a worktree. The workspace-level hook also applies when Claude is started from the rarebit-one workspace root. There are no opt-outs.
+**All file modifications are blocked in the main checkout.** A PreToolUse hook (`.claude/hooks/enforce-worktree.sh`, registered in `.claude/settings.json`) rejects Edit, Write, and NotebookEdit operations targeting files outside a worktree. The workspace-level hook also applies when Claude is started from the rarebit-one workspace root. There are no interactive opt-outs (the hook does exit 0 in `CI=true` / `GITHUB_ACTIONS` so the PR agent can make edits during automated runs).
 
 Before writing any code, create a worktree:
 
