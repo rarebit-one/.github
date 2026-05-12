@@ -2,9 +2,9 @@
 
 This is the rarebit-one **org-level** `.github` repo. It hosts shared reusable GitHub Actions workflows referenced by every gem and app in the workspace.
 
-## Worktree-Only Workflow
+## Worktree-Only Workflow (Enforced)
 
-**Convention:** make all file modifications inside a worktree, not the main checkout. When Claude Code is started from the rarebit-one workspace root (this repo's parent), a workspace-level PreToolUse hook (`<workspace>/.claude/hooks/enforce-worktree.sh`) blocks `Edit`/`Write`/`NotebookEdit` outside `.worktrees/<name>/`. This repo has no per-repo `.claude/` config, so when launching Claude Code directly in this directory the enforcement is by convention only.
+**All file modifications are blocked in the main checkout.** A PreToolUse hook (`.claude/hooks/enforce-worktree.sh`, registered in `.claude/settings.json`) rejects Edit, Write, and NotebookEdit operations targeting files outside a worktree. The workspace-level hook also applies when Claude is started from the rarebit-one workspace root. There are no opt-outs.
 
 Before writing any code, create a worktree:
 
