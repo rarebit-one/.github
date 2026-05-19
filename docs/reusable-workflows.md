@@ -186,6 +186,95 @@ jobs:
         [{"repo": "rarebit-one/ground_control-api", "path": "../ground_control-api"}]
 ```
 
+## `reusable-maven-central-release.yml`
+
+Two-job release workflow (`release` + `publish`) triggered on `v*` tags for
+Kotlin Multiplatform libraries publishing to Maven Central via
+[vanniktech/gradle-maven-publish-plugin][vanniktech]. Validates the tag
+against `gradle.properties`, extracts CHANGELOG notes, creates a GitHub
+Release, then runs `./gradlew publishAndReleaseToMavenCentral` to push the
+artifacts (with in-memory GPG signing) and auto-release the staging
+repository via the Central Portal API.
+
+The `publish` job runs in a GitHub Environment (default `maven-central`) so
+secrets can be env-scoped and `v*` tag-deployment-branch-policy can gate
+which refs may publish.
+
+[vanniktech]: https://github.com/vanniktech/gradle-maven-publish-plugin
+
+### Inputs
+
+| Input             | Type   | Required | Default          | Description |
+|-------------------|--------|----------|------------------|-------------|
+| `project-name`    | string | yes      | —                | Project name (for log clarity only). |
+| `version-key`     | string | no       | `VERSION_NAME`   | gradle.properties key holding the release version. |
+| `changelog-path`  | string | no       | `CHANGELOG.md`   | Path to the changelog file. |
+| `jdk-version`     | string | no       | `21`             | JDK version for the build/publish job. |
+| `publish-runs-on` | string | no       | `macos-latest`   | Runner OS for the publish job. KMP iOS/macOS targets require `macos-latest`. JVM-only libraries can downgrade to `ubuntu-latest`. |
+| `environment`     | string | no       | `maven-central`  | GitHub Environment for the publish job. |
+
+### Required secrets (inherited via `secrets: inherit`)
+
+Recommended at GitHub Environment scope rather than repo scope:
+
+| Secret                    | Description |
+|---------------------------|-------------|
+| `SIGNING_KEY`             | ASCII-armored GPG private key (no passphrase). |
+| `SIGNING_KEY_ID`          | Last 8 hex chars of the GPG fingerprint. Explicit selection guards against future key rotations silently using the wrong key. |
+| `MAVEN_CENTRAL_USERNAME`  | Sonatype Central Portal user token name. |
+| `MAVEN_CENTRAL_PASSWORD`  | Sonatype Central Portal user token value. |
+
+### Behavior
+
+- The `release` job runs on `ubuntu-latest` with `permissions: contents: write`.
+- The `publish` job runs on the configured runner (default `macos-latest`),
+  uses the configured GitHub Environment, and only `permissions: contents: read`.
+- Tag validation grep's the `version-key` from `gradle.properties`. The
+  consumer build is expected to read `VERSION_NAME` (vanniktech's default).
+- Publish uses `--no-configuration-cache` because vanniktech is incompatible
+  with Gradle configuration cache.
+
+### Example
+
+```yaml
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    uses: rarebit-one/.github/.github/workflows/reusable-maven-central-release.yml@v1
+    with:
+      project-name: ktor-armour
+    permissions:
+      contents: write
+    secrets: inherit
+```
+
+### Example — JVM-only library (faster runner)
+
+```yaml
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    uses: rarebit-one/.github/.github/workflows/reusable-maven-central-release.yml@v1
+    with:
+      project-name: my-jvm-lib
+      publish-runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    secrets: inherit
+```
+
 ## `reusable-weekly-maintenance.yml`
 
 Single reusable workflow that drives the weekly maintenance cron across every
