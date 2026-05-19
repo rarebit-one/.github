@@ -1,0 +1,158 @@
+name: Reusable Maven Central Release
+
+# Reusable Release workflow for Kotlin Multiplatform libraries in the
+# rarebit-one organization publishing to Maven Central via
+# vanniktech/gradle-maven-publish-plugin.
+#
+# Consumers reference this with:
+#
+#   on:
+#     push:
+#       tags:
+#         - "v*"
+#
+#   jobs:
+#     release:
+#       uses: rarebit-one/.github/.github/workflows/reusable-maven-central-release.yml@v1
+#       with:
+#         project-name: ktor-armour
+#       permissions:
+#         contents: write
+#       secrets: inherit
+#
+# (No `id-token: write` is needed — Maven Central authentication uses the
+# username/password secrets below, not OIDC.)
+#
+# Required secrets (inherited from the consumer; recommended at GitHub
+# Environment scope, not repo scope):
+#   - SIGNING_KEY            ASCII-armored GPG private key
+#   - SIGNING_KEY_ID         last 8 hex chars of the GPG fingerprint
+#   - MAVEN_CENTRAL_USERNAME Sonatype Portal user token name
+#   - MAVEN_CENTRAL_PASSWORD Sonatype Portal user token value
+
+on:
+  workflow_call:
+    inputs:
+      project-name:
+        description: 'Project name (for log clarity).'
+        required: true
+        type: string
+      version-key:
+        description: 'gradle.properties key holding the release version.'
+        required: false
+        type: string
+        default: 'VERSION_NAME'
+      changelog-path:
+        description: 'Path to CHANGELOG.md (release notes source).'
+        required: false
+        type: string
+        default: 'CHANGELOG.md'
+      jdk-version:
+        description: 'JDK version for the build/publish job.'
+        required: false
+        type: string
+        default: '21'
+      publish-runs-on:
+        description: 'Runner OS for the publish job. KMP iOS/macOS targets require macos-latest.'
+        required: false
+        type: string
+        default: 'macos-latest'
+      environment:
+        description: 'GitHub Environment to scope secrets + branch policy for the publish job.'
+        required: false
+        type: string
+        default: 'maven-central'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Verify tag matches ${{ inputs.version-key }} in gradle.properties
+        env:
+          VERSION_KEY: ${{ inputs.version-key }}
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          gradle_version=$(grep "^${VERSION_KEY}=" gradle.properties | cut -d'=' -f2-)
+          if [ -z "$gradle_version" ]; then
+            echo "::error::Key ${VERSION_KEY} not found in gradle.properties"
+            exit 1
+          fi
+          if [ "$tag_version" != "$gradle_version" ]; then
+            echo "::error::Tag version ($tag_version) does not match gradle.properties ${VERSION_KEY} ($gradle_version)"
+            exit 1
+          fi
+          echo "Version $gradle_version is consistent with tag $GITHUB_REF_NAME"
+
+      - name: Extract changelog entry
+        id: changelog
+        env:
+          CHANGELOG_PATH: ${{ inputs.changelog-path }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          notes=$(awk -v ver="$version" '
+            /^## \[/ {
+              if (found) exit
+              if ($0 ~ "^## \\[" ver "\\]") found=1
+              next
+            }
+            found { print }
+          ' "$CHANGELOG_PATH")
+
+          if [ -z "$notes" ]; then
+            echo "::error::No ${CHANGELOG_PATH} entry found for version $version"
+            exit 1
+          fi
+
+          # Random delimiter prevents injection via changelog content
+          delimiter="EOF_$(openssl rand -hex 8)"
+          {
+            echo "notes<<${delimiter}"
+            echo "$notes"
+            echo "${delimiter}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_NOTES: ${{ steps.changelog.outputs.notes }}
+        run: |
+          printf "%s" "$RELEASE_NOTES" > /tmp/release_notes.txt
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file /tmp/release_notes.txt
+
+  publish:
+    needs: release
+    runs-on: ${{ inputs.publish-runs-on }}
+    timeout-minutes: 30
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up JDK ${{ inputs.jdk-version }}
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.jdk-version }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@4c125117fe7c5aed11272ec4213f602f012f89f2 # v5
+
+      - name: Build all targets
+        run: ./gradlew build --no-daemon --no-configuration-cache
+
+      - name: Publish to Maven Central
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.SIGNING_KEY_ID }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ''
+        run: ./gradlew publishAndReleaseToMavenCentral --no-daemon --no-configuration-cache
