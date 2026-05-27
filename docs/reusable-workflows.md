@@ -288,11 +288,15 @@ A run does the following:
 2. Sets up the toolchain for the chosen stack (Ruby/Node/JDK+Gradle).
 3. Captures a TODO/FIXME census, restoring last week's snapshot from cache and
    computing a delta.
-4. Hands off to `anthropics/claude-code-action` with a stack-aware prompt that
-   runs the dependency updates, runs the verification commands you supply
-   (`lint-commands`, `test-commands`, or `gradle-test-command`), and — only
-   when verification passes — opens a signed PR via the GitHub API.
-5. Uploads `tmp/maintenance/` (prompt, TODO/FIXME census + diff) as an
+4. Captures open CodeQL code-scanning alerts (when `review-security-alerts` is
+   true) to `tmp/maintenance/codeql-alerts.json` for the prompt.
+5. Hands off to `anthropics/claude-code-action` with a stack-aware prompt that
+   runs the dependency updates, reviews any open code-scanning alerts (fixing
+   actionable ones, reporting the rest — never dismissing), runs the
+   verification commands you supply (`lint-commands`, `test-commands`, or
+   `gradle-test-command`), and — only when verification passes — opens a signed
+   PR via the GitHub API.
+6. Uploads `tmp/maintenance/` (prompt, TODO/FIXME census + diff) as an
    artifact for inspection.
 
 ### Inputs
@@ -318,6 +322,7 @@ A run does the following:
 | `todo-fixme-exclude` | string | no | (sensible defaults) | Space-separated globs excluded from the census. |
 | `timeout-minutes` | number | no | `45` | Job-level timeout. |
 | `claude-timeout-minutes` | number | no | `25` | Timeout for the Claude action step. |
+| `review-security-alerts` | boolean | no | `true` | Fetch open CodeQL code-scanning alerts (via `security-events: read`) into the prompt so Claude fixes actionable ones and reports the rest in the PR. Never auto-dismisses. Tolerates repos without code scanning. |
 
 ### Secrets
 
