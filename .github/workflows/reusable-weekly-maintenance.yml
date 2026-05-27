@@ -4,9 +4,14 @@ name: Reusable Weekly Maintenance
 #
 # Consumers reference this with:
 #
+#   permissions:
+#     contents: write
+#     pull-requests: write
+#     id-token: write
+#     security-events: read   # required for the CodeQL alert review (read-only)
 #   jobs:
 #     maintenance:
-#       uses: <org>/.github/.github/workflows/reusable-weekly-maintenance.yml@v1
+#       uses: <org>/.github/.github/workflows/reusable-weekly-maintenance.yml@v2
 #       with:
 #         stack: rails
 #         run-brakeman: true

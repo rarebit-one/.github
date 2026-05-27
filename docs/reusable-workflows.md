@@ -357,11 +357,15 @@ on:
     - cron: '0 0 * * 0'
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+  security-events: read
 
 jobs:
   maintenance:
-    uses: rarebit-one/.github/.github/workflows/reusable-weekly-maintenance.yml@v1
+    uses: rarebit-one/.github/.github/workflows/reusable-weekly-maintenance.yml@v2
     with:
       stack: rails
       run-brakeman: true
@@ -389,11 +393,15 @@ on:
     - cron: '0 0 * * 0'
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+  security-events: read
 
 jobs:
   maintenance:
-    uses: rarebit-one/.github/.github/workflows/reusable-weekly-maintenance.yml@v1
+    uses: rarebit-one/.github/.github/workflows/reusable-weekly-maintenance.yml@v2
     with:
       stack: ruby-gem
       ruby-version: '4.0.3'
@@ -416,11 +424,15 @@ on:
     - cron: '0 0 * * 0'
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+  security-events: read
 
 jobs:
   maintenance:
-    uses: rarebit-one/.github/.github/workflows/reusable-weekly-maintenance.yml@v1
+    uses: rarebit-one/.github/.github/workflows/reusable-weekly-maintenance.yml@v2
     with:
       stack: node-lib
       node-version: '20'
