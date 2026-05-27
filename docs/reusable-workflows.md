@@ -322,7 +322,7 @@ A run does the following:
 | `todo-fixme-exclude` | string | no | (sensible defaults) | Space-separated globs excluded from the census. |
 | `timeout-minutes` | number | no | `45` | Job-level timeout. |
 | `claude-timeout-minutes` | number | no | `25` | Timeout for the Claude action step. |
-| `review-security-alerts` | boolean | no | `true` | Fetch open CodeQL code-scanning alerts (via `security-events: read`) into the prompt so Claude fixes actionable ones and reports the rest in the PR. Never auto-dismisses. Tolerates repos without code scanning. |
+| `review-security-alerts` | boolean | no | `true` | Fetch open CodeQL code-scanning alerts (via `security-events: read`, `tool_name=CodeQL`, up to 100 per run) into the prompt so Claude fixes actionable ones and reports the rest in the PR. Never auto-dismisses. Tolerates repos without code scanning. |
 
 ### Secrets
 
@@ -334,7 +334,10 @@ A run does the following:
 ### Behavior
 
 - Top-level `permissions: {}`; the job re-grants `contents: write`,
-  `pull-requests: write`, `id-token: write` for the signed-commit + PR flow.
+  `pull-requests: write`, `id-token: write` for the signed-commit + PR flow,
+  plus `security-events: read`. The read scope is always granted (Actions has a
+  static permissions model) but is only exercised when `review-security-alerts:
+  true`; it is never `write`, so the workflow can never dismiss alerts.
 - All third-party actions are SHA-pinned (checkout, ruby/setup-ruby,
   setup-node, anthropics/claude-code-action). KMP-only setup-java and
   setup-gradle remain on floating major tags pending org-wide pinning.

@@ -301,7 +301,9 @@ jobs:
           mkdir -p tmp/maintenance
           # security-events read may be unavailable (e.g. private repo without
           # GHAS, or code scanning never enabled); tolerate failure gracefully.
-          if gh api "repos/$REPO/code-scanning/alerts?state=open&per_page=100" \
+          # tool_name=CodeQL keeps this strictly CodeQL (other SAST tools are
+          # excluded by design); per_page caps the review at 100 open alerts.
+          if gh api "repos/$REPO/code-scanning/alerts?state=open&per_page=100&tool_name=CodeQL" \
                > tmp/maintenance/codeql-alerts.json 2>/dev/null; then
             COUNT=$(jq 'length' tmp/maintenance/codeql-alerts.json)
           else
