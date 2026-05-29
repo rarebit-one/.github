@@ -21,6 +21,28 @@ Available reusable workflows:
   auto-fix PRs (the apply step mirrors the post-deploy autofix safety model
   developed in sidekick-labs).
 
+## Claude model selection
+
+Every workflow that invokes `anthropics/claude-code-action` (`claude-agent`,
+`claude-code-review`, `reusable-weekly-maintenance`, `reusable-sentry-autofix`)
+resolves the model from a single source:
+
+```yaml
+env:
+  CLAUDE_MODEL: "${{ vars.CLAUDE_MODEL || 'claude-opus-4-8' }}"
+# referenced at each call site as: --model ${{ env.CLAUDE_MODEL }}
+```
+
+- **To change the model org-wide**, set the `CLAUDE_MODEL` organization Actions
+  variable — `gh variable set CLAUDE_MODEL --org rarebit-one --body <id> --visibility all`.
+  No PR or re-tag needed: `vars` resolves in the **caller's** context, so the
+  org variable reaches every consumer on its next run.
+- The literal (`claude-opus-4-8`) is a **fallback** so an unset variable can't
+  produce an empty `--model` (which would silently fall back to the action's
+  own default — the drift this guards against).
+- Composite actions can't read `vars`, so any composite that wraps
+  `claude-code-action` keeps its own literal `--model` instead.
+
 ## `reusable-gem-ci.yml`
 
 CI workflow for Ruby gems with three jobs: `lint`, `test-matrix` (one
