@@ -1,0 +1,321 @@
+name: Deploy to DigitalOcean App Platform
+description: >-
+  Patch a live DO App Platform appspec to a DOCR image pinned at a given SHA,
+  apply it, and poll the resulting deployment to a terminal phase. Backs the
+  DOCR-image deploy model for the rarebit-one web apps (luminality-web,
+  nutripod-web) — the caller builds + pushes the image to DOCR, then invokes
+  this action to point the live app at that tag and wait for the rollout.
+  Mirrored verbatim into fundbright/.github for fundbright-web (separate org);
+  update both copies together.
+
+  PREREQUISITES (the caller must do these before invoking this action):
+    - `doctl` is installed and authenticated (`doctl auth init --access-token …`).
+      doctl persists auth under $HOME for the rest of the job, so this action's
+      doctl calls inherit it.
+    - `yq` (mikefarah) and `jq` are on PATH — both preinstalled on ubuntu-latest.
+
+  This action NEVER exits non-zero. EVERY failure path — pre-flight input
+  validation, spec fetch, patch, apply, and poll — emits a `phase` sentinel +
+  `outcome=failure` via the step outputs and exits 0. The caller is expected to
+  (a) read the outputs from `always()` steps (post-deploy triage, status
+  updates) and (b) gate the job's success on `outcome == 'success'`
+  (equivalently `phase == 'ACTIVE'`) immediately after this step, before any
+  success-only steps (release tag, Sentry notify). Because a failed composite
+  action does not reliably propagate its outputs, keeping every path on the
+  exit-0 + sentinel contract is what lets the caller always read a `phase` — the
+  two steps below share the same output keys, and the action-level outputs fall
+  back from `deploy` to `patch_spec` so a pre-deploy failure still surfaces.
+
+inputs:
+  app_id:
+    description: DigitalOcean App Platform app ID (e.g. vars.DO_STAGING_APP_ID).
+    required: true
+  image_repo:
+    description: DOCR repository name to pin every component to (e.g. luminality-web).
+    required: true
+  deploy_sha:
+    description: Commit SHA (or tag) to set as the image tag on every component.
+    required: true
+  poll_timeout_seconds:
+    description: How long to poll for a terminal phase before giving up. Matches doctl's internal --wait timeout.
+    required: false
+    default: "1800"
+  poll_interval_seconds:
+    description: Polling cadence while the deploy is in flight (seconds, must be >= 1).
+    required: false
+    default: "10"
+
+outputs:
+  do_deploy_id:
+    description: The DigitalOcean deployment ID for this deploy (empty if the update never produced one).
+    value: ${{ steps.deploy.outputs.do_deploy_id || steps.patch_spec.outputs.do_deploy_id }}
+  do_deploy_url:
+    description: Cloud console URL for the deployment (empty if no deploy id).
+    value: ${{ steps.deploy.outputs.do_deploy_url || steps.patch_spec.outputs.do_deploy_url }}
+  phase:
+    description: >-
+      Outcome phase. ACTIVE on success; on failure one of ERROR / CANCELED /
+      SUPERSEDED (DO terminal phases), TIMEOUT (polling deadline hit before a
+      terminal phase), or a sentinel: INVALID_INPUT / SPEC_FETCH_FAILED /
+      PATCH_FAILED / NO_COMPONENTS (pre-deploy) or UPDATE_FAILED / PARSE_FAILED
+      / NO_DEPLOY_ID (apply).
+    value: ${{ steps.deploy.outputs.phase || steps.patch_spec.outputs.phase }}
+  outcome:
+    description: "'success' when phase == ACTIVE, otherwise 'failure'. Convenience for the caller's gate step."
+    value: ${{ steps.deploy.outputs.outcome || steps.patch_spec.outputs.outcome }}
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch live appspec and patch image to DOCR + SHA
+      id: patch_spec
+      shell: bash
+      env:
+        APP_ID: ${{ inputs.app_id }}
+        IMAGE_REPO: ${{ inputs.image_repo }}
+        DEPLOY_SHA: ${{ inputs.deploy_sha }}
+      run: |
+        set -uo pipefail
+        # Like the deploy step, this step NEVER exits non-zero: pre-flight and
+        # patch failures emit a phase sentinel + outcome=failure and exit 0, so
+        # the caller can read a `phase` even when the deploy step is skipped
+        # (it's gated on this step's outcome). The action-level outputs fall
+        # back to this step's outputs when `deploy` doesn't run.
+        emit() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
+        fail() {
+          emit phase "$1"
+          emit outcome "failure"
+          emit do_deploy_id ""
+          emit do_deploy_url ""
+          exit 0
+        }
+
+        # `required: true` only enforces presence, not non-emptiness — an empty
+        # `vars.DO_STAGING_APP_ID` would otherwise sail through to doctl/yq and
+        # fail with an opaque message. Catch it up front with a clear sentinel.
+        if [ -z "$APP_ID" ] || [ -z "$IMAGE_REPO" ] || [ -z "$DEPLOY_SHA" ]; then
+          echo "::error::app_id, image_repo and deploy_sha must all be non-empty (got app_id='$APP_ID' image_repo='$IMAGE_REPO' deploy_sha='$DEPLOY_SHA')"
+          fail "INVALID_INPUT"
+        fi
+
+        # DO is the source of truth for the appspec — env vars, instance
+        # sizes, alerts, etc. are managed in the DO UI. We only patch the
+        # image source: replace the `github`/`dockerfile_path` build with
+        # an `image:` block pinned to this commit's SHA. Restarts and
+        # instance replacements then pull the same digest CI validated.
+        #
+        # `(.services[], .workers[], .jobs[])` walks all three component
+        # arrays; missing keys yield no matches (yq is forgiving), and
+        # `|=` on no matches is a no-op. This keeps the patch correct
+        # even if the appspec later grows a worker or scheduled job.
+        if ! doctl apps spec get "$APP_ID" > /tmp/spec.yaml 2>/tmp/do-spec-stderr; then
+          echo "::error::doctl apps spec get failed for $APP_ID: $(cat /tmp/do-spec-stderr 2>/dev/null || echo 'stderr unavailable')"
+          fail "SPEC_FETCH_FAILED"
+        fi
+
+        # `mikefarah/yq` is preinstalled on ubuntu-latest. `strenv()` is
+        # the safe way to interpolate env vars into a yq expression.
+        if ! yq -i '
+          (.services[], .workers[], .jobs[]) |= (
+            del(.dockerfile_path, .source_dir, .github) |
+            .image = {
+              "registry_type": "DOCR",
+              "repository": strenv(IMAGE_REPO),
+              "tag": strenv(DEPLOY_SHA)
+            }
+          )
+        ' /tmp/spec.yaml 2>/tmp/do-yq-stderr; then
+          echo "::error::yq patch failed: $(cat /tmp/do-yq-stderr 2>/dev/null || echo 'stderr unavailable')"
+          fail "PATCH_FAILED"
+        fi
+
+        # A wrong app_id can resolve to a component-less app: the patch above
+        # would then be a silent no-op and we'd deploy an unmodified spec.
+        # Require at least one component to have been patched.
+        PATCHED=$(yq -r '[.services[], .workers[], .jobs[]] | length' /tmp/spec.yaml 2>/dev/null)
+        [[ "$PATCHED" =~ ^[0-9]+$ ]] || PATCHED=0
+        if [ "$PATCHED" -eq 0 ]; then
+          echo "::error::appspec for $APP_ID has no services/workers/jobs to patch — wrong app_id?"
+          fail "NO_COMPONENTS"
+        fi
+
+        # Verify every component now points at the expected DOCR repo + tag —
+        # not just the tag, so a stale/partial image block (wrong repository,
+        # or a non-DOCR registry_type) is also caught.
+        UNEXPECTED=$(yq -r '
+          [.services[], .workers[], .jobs[]]
+          | map(select(.image.registry_type != "DOCR" or .image.repository != strenv(IMAGE_REPO) or .image.tag != strenv(DEPLOY_SHA)) | .name)
+          | join(",")
+        ' /tmp/spec.yaml)
+        if [ -n "$UNEXPECTED" ]; then
+          echo "::error::Components not patched to DOCR/$IMAGE_REPO:$DEPLOY_SHA: $UNEXPECTED"
+          fail "PATCH_FAILED"
+        fi
+        echo "Patched $PATCHED component(s) to DOCR/$IMAGE_REPO:$DEPLOY_SHA"
+
+    - name: Apply spec and wait for deploy
+      id: deploy
+      # Skip when pre-flight/patch already failed — its sentinel is surfaced via
+      # the action-level output fallback, so the caller still reads a `phase`.
+      # Keeps the whole action on one uniform exit-0 + sentinel contract.
+      if: ${{ steps.patch_spec.outputs.outcome != 'failure' }}
+      shell: bash
+      env:
+        APP_ID: ${{ inputs.app_id }}
+        POLL_TIMEOUT: ${{ inputs.poll_timeout_seconds }}
+        POLL_INTERVAL: ${{ inputs.poll_interval_seconds }}
+      run: |
+        set -uo pipefail
+        # This step NEVER exits non-zero (see the action description): it
+        # records the outcome via outputs and lets the caller gate on it.
+        # All commands that may exit non-zero are guarded with `||` patterns.
+
+        emit() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
+        fail() {
+          # phase sentinel only; no deploy id captured. Caller gate fails the job.
+          emit phase "$1"
+          emit do_deploy_id ""
+          emit do_deploy_url ""
+          emit outcome "failure"
+          exit 0
+        }
+
+        # Validate the numeric inputs before they reach arithmetic context.
+        # Under `set -e` a non-numeric value (e.g. "30m" or "") would make
+        # `$(( … + POLL_TIMEOUT ))` abort the step with an opaque message;
+        # fail fast with a clear sentinel instead so the caller's gate sees it.
+        if ! [[ "$POLL_TIMEOUT" =~ ^[0-9]+$ ]] || ! [[ "$POLL_INTERVAL" =~ ^[0-9]+$ ]]; then
+          echo "::error::poll_timeout_seconds / poll_interval_seconds must be integer seconds (got '$POLL_TIMEOUT' / '$POLL_INTERVAL')"
+          fail "INVALID_INPUT"
+        fi
+        # interval 0 would turn the poll into a sleep-0 busy-loop hammering the
+        # DO API; a timeout below the interval would never poll at all.
+        if [ "$POLL_INTERVAL" -lt 1 ] || [ "$POLL_TIMEOUT" -lt "$POLL_INTERVAL" ]; then
+          echo "::error::need poll_interval_seconds >= 1 and poll_timeout_seconds >= poll_interval_seconds (got interval=$POLL_INTERVAL timeout=$POLL_TIMEOUT)"
+          fail "INVALID_INPUT"
+        fi
+
+        # ─── Phase 1: kick off the deploy and CAPTURE THE ID ─────────
+        #
+        # We deliberately do NOT use `doctl apps update --wait`. The
+        # `--wait` form blocks for the full deploy lifecycle, then we
+        # had to guess which deployment was ours from `apps get` —
+        # which on a failed deploy returns the rollback (DO promotes
+        # the rollback into `in_progress_deployment` immediately when
+        # our deploy fails, before doctl's `--wait` even returns).
+        #
+        # Instead: send the spec update without `--wait`. doctl's JSON
+        # response includes the freshly-created `in_progress_deployment`
+        # — that's OUR deployment, captured at the source. From here
+        # on, we hold the exact ID for the rest of the flow regardless
+        # of any rollback DO does in the background.
+        # Capture stderr separately — `doctl --output json` writes only
+        # JSON to stdout, but warnings (deprecations, retries) land on
+        # stderr. Mixing them would make jq trip over the JSON envelope.
+        UPDATE_JSON=$(doctl apps update "$APP_ID" --spec /tmp/spec.yaml --output json 2>/tmp/do-update-stderr) || {
+          # In `--output json` mode doctl emits API errors as a JSON envelope
+          # on stdout (captured into $UPDATE_JSON) and leaves stderr empty —
+          # dump both so the failure surfaces the actual API message.
+          echo "::error::doctl apps update failed: $(cat /tmp/do-update-stderr 2>/dev/null || echo 'stderr unavailable')"
+          echo "::group::doctl apps update stdout"
+          printf '%s\n' "$UPDATE_JSON"
+          echo "::endgroup::"
+          fail "UPDATE_FAILED"
+        }
+        if ! echo "$UPDATE_JSON" | jq empty 2>/dev/null; then
+          echo "::error::doctl apps update returned no parseable JSON"
+          cat /tmp/do-update-stderr 2>/dev/null || true
+          fail "PARSE_FAILED"
+        fi
+
+        # The deployment is created synchronously with the spec update, so its
+        # id is in this response. We deliberately do NOT fall back to a fresh
+        # `doctl apps get` when it's missing: on a fast-failing deploy DO
+        # promotes the rollback into `in_progress_deployment` within seconds, so
+        # a refetch could capture the rollback's id and poll the WRONG
+        # deployment to ACTIVE — reintroducing the exact rollback-shadowing this
+        # id-at-the-source approach exists to avoid. Absence is therefore fatal.
+        DEPLOY_ID=$(echo "$UPDATE_JSON" | jq -r '.[0].in_progress_deployment.id // ""')
+        if [ -z "$DEPLOY_ID" ]; then
+          echo "::error::doctl apps update response did not include in_progress_deployment.id"
+          echo "$UPDATE_JSON" | jq '.[0] | {id, phase: .phase, in_progress: .in_progress_deployment, active: .active_deployment}' 2>/dev/null || true
+          fail "NO_DEPLOY_ID"
+        fi
+        echo "Started deployment: $DEPLOY_ID"
+
+        # Emit the ID up-front so downstream consumers (post-deploy
+        # triage, failure-comment step, GitHub Deployment status) have
+        # it even if the polling loop below times out.
+        emit do_deploy_id "$DEPLOY_ID"
+        emit do_deploy_url "https://cloud.digitalocean.com/apps/${APP_ID}/deployments/${DEPLOY_ID}"
+
+        # ─── Phase 2: poll for terminal phase ────────────────────────
+        #
+        # Replaces what `--wait` would do, but bound to our specific
+        # deployment ID instead of "whatever's in_progress now". DO
+        # phases:
+        #   PENDING_BUILD → BUILDING → PENDING_DEPLOY → DEPLOYING
+        #     → ACTIVE                                       (success)
+        #     → ERROR / CANCELED / SUPERSEDED                (failure)
+        #
+        # Default 30-minute deadline matches doctl's internal `--wait`
+        # timeout; 10-second cadence mirrors doctl. Outer bound is still
+        # the job-level timeout.
+        DEADLINE=$(( $(date +%s) + POLL_TIMEOUT ))
+        PHASE="UNKNOWN"
+        # Assume timeout until a terminal phase clears it. Tracking *why* the
+        # loop exited (terminal phase vs deadline) is more reliable than
+        # re-checking the clock afterwards: a deploy that reaches ACTIVE in
+        # the last poll interval can leave `date +%s >= DEADLINE` true and
+        # would otherwise emit a spurious "timed out" warning on a success.
+        TIMED_OUT=1
+        # Surface persistent get-deployment failures so we don't silently
+        # spin for the full deadline on a wedged API / bad credentials.
+        # Reset on every successful response so the warning only fires
+        # for sustained outages, not isolated blips.
+        UNKNOWN_COUNT=0
+        while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+          PHASE=$(doctl apps get-deployment "$APP_ID" "$DEPLOY_ID" \
+            --format Phase --no-header 2>/dev/null | tr -d '[:space:]' || echo "UNKNOWN")
+          PHASE="${PHASE:-UNKNOWN}"
+          case "$PHASE" in
+            ACTIVE)
+              TIMED_OUT=0
+              break
+              ;;
+            ERROR|CANCELED|SUPERSEDED)
+              TIMED_OUT=0
+              break
+              ;;
+            UNKNOWN)
+              UNKNOWN_COUNT=$(( UNKNOWN_COUNT + 1 ))
+              if [ "$UNKNOWN_COUNT" -ge 6 ]; then
+                echo "::warning::get-deployment returned UNKNOWN 6 polls in a row — DO API may be unreachable"
+                UNKNOWN_COUNT=0
+              fi
+              sleep "$POLL_INTERVAL"
+              ;;
+            *)
+              # Still in flight (PENDING_BUILD / BUILDING / PENDING_DEPLOY / DEPLOYING).
+              UNKNOWN_COUNT=0
+              sleep "$POLL_INTERVAL"
+              ;;
+          esac
+        done
+
+        if [ "$TIMED_OUT" -eq 1 ]; then
+          # Emit an unambiguous TIMEOUT sentinel rather than whatever
+          # in-flight phase (DEPLOYING / PENDING_DEPLOY / UNKNOWN) happened
+          # to be last seen — so callers can detect a timeout without
+          # enumerating every non-terminal state.
+          echo "::warning::Deployment $DEPLOY_ID timed out after ${POLL_TIMEOUT}s (last seen phase: $PHASE)"
+          PHASE="TIMEOUT"
+        fi
+
+        if [ "$PHASE" = "ACTIVE" ]; then
+          emit outcome "success"
+        else
+          emit outcome "failure"
+        fi
+        emit phase "$PHASE"
+        echo "Deployed $DEPLOY_ID (phase=$PHASE)"
