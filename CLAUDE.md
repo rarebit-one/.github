@@ -44,3 +44,7 @@ Consumers pin to a **moving major tag** (or a specific SHA) rather than `@main`,
 | `@main` | `claude-agent`, `claude-code-review`, `deploy-production` (low-contract dispatchers; changes go live immediately on merge) |
 
 Because changes ripple across all consumers, test against at least one downstream consumer (e.g. a standard_* gem) before re-pointing a tag. There is no equivalent of `/rollout-gem` for these workflows.
+
+## Claude model
+
+The Claude-invoking workflows (`claude-agent`, `claude-code-review`, `reusable-weekly-maintenance`, `reusable-sentry-autofix`) pin the model via a single per-file `env: CLAUDE_MODEL: "${{ vars.CLAUDE_MODEL || 'claude-opus-4-8' }}"`, referenced as `--model ${{ env.CLAUDE_MODEL }}`. **To bump the model org-wide**, set the `CLAUDE_MODEL` org variable (`gh variable set CLAUDE_MODEL --org rarebit-one --body <id> --visibility all`) — no PR or re-tag; `vars` resolves in the caller's context so it reaches every consumer. The literal is a safe fallback against an unset variable. See `docs/reusable-workflows.md` → "Claude model selection". (The same convention is mirrored in `fundbright/.github`.)
