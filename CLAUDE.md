@@ -32,9 +32,15 @@ See `docs/reusable-workflows.md` for the full input/output contract of each reus
 Every gem and app in the rarebit-one workspace consumes one or more workflows here:
 
 ```yaml
-uses: rarebit-one/.github/.github/workflows/<name>.yml@v1
+uses: rarebit-one/.github/.github/workflows/<name>.yml@<ref>
 ```
 
-Pin to `@v1` (or a specific SHA) for stability — `@main` works but offers no contract. Because changes ripple across all consumers, test against at least one downstream consumer (e.g. a standard_* gem) before tagging a new `v1.x` release.
+Consumers pin to a **moving major tag** (or a specific SHA) rather than `@main`, which works but offers no contract. The tag in use differs per workflow — re-point the relevant tag to `main` HEAD after merging a change, and consumers pick it up on their next run:
 
-There is no equivalent of `/rollout-gem` for these workflows — consumers pick up the new `v1` tag automatically on their next CI run.
+| Ref | Workflows |
+|-----|-----------|
+| `@v1` | `reusable-gem-ci`, `reusable-gem-release`, `sentry-release` |
+| `@v2` | `reusable-weekly-maintenance`, `reusable-sentry-autofix`, `reusable-maven-central-release` |
+| `@main` | `claude-agent`, `claude-code-review`, `deploy-production` (low-contract dispatchers; changes go live immediately on merge) |
+
+Because changes ripple across all consumers, test against at least one downstream consumer (e.g. a standard_* gem) before re-pointing a tag. There is no equivalent of `/rollout-gem` for these workflows.
