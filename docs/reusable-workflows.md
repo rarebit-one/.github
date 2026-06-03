@@ -17,9 +17,10 @@ Available reusable workflows:
 - **`reusable-maven-central-release.yml`** — Maven Central release via Gradle.
 - **`reusable-weekly-maintenance.yml`** — weekly dependency-update / lint / test /
   CodeQL-alert sweep across every stack.
-- **`reusable-sentry-autofix.yml`** — daily Sentry-issue triage with optional
-  auto-fix PRs (the apply step mirrors the post-deploy autofix safety model
-  developed in sidekick-labs).
+- **`reusable-sentry-autofix.yml`** — Sentry-issue triage with auto-fix PRs
+  (the apply step mirrors the post-deploy autofix safety model developed in
+  sidekick-labs) and a GitHub-issue fallback. Dispatched per-project by the
+  `rarebit-sre` sweep.
 
 ## Claude model selection
 
@@ -349,7 +350,6 @@ A run does the following:
 | `lint-commands` | string | no | `""` | Multiline shell — every line is a verification command (e.g. `bin/rubocop`, `npm run lint`). |
 | `test-commands` | string | no | `""` | Multiline shell — full test-suite verification commands. |
 | `gradle-test-command` | string | no | `./gradlew test` | KMP test command. |
-| `linear-fallback` | boolean | no | `false` | When true, Claude opens a Linear issue for risky/judgment-call items. Requires `linear-api-key` secret. |
 | `additional-allowed-tools` | string | no | `""` | Comma-separated entries appended to `--allowed-tools`. |
 | `todo-fixme-paths` | string | no | `.` | Space-separated paths scanned for TODO/FIXME. |
 | `todo-fixme-exclude` | string | no | (sensible defaults) | Space-separated globs excluded from the census. |
@@ -362,7 +362,6 @@ A run does the following:
 | Secret | Required | Description |
 |---|---|---|
 | `claude-code-oauth-token` | yes | OAuth token for `anthropics/claude-code-action`. |
-| `linear-api-key` | no | Required only when `linear-fallback: true`. |
 
 ### Behavior
 
@@ -374,9 +373,9 @@ A run does the following:
 - All third-party actions are SHA-pinned (checkout, ruby/setup-ruby,
   setup-node, anthropics/claude-code-action). KMP-only setup-java and
   setup-gradle remain on floating major tags pending org-wide pinning.
-- Linear MCP server is always declared but only consulted when
-  `linear-fallback: true` (Claude only authorises the `mcp__linear__*` tools
-  in that mode).
+- Risky judgment-call items (major bumps, code-changing fixes, design-decision
+  TODOs) are summarised in the PR body (or the run output when there's no PR)
+  for a human to pick up. No issue tracker is written to.
 - TODO/FIXME census uses `actions/cache` to keep the previous run's snapshot
   scoped per `repository_id`; week-over-week delta surfaces in `$GITHUB_STEP_SUMMARY`
   and in the PR body.
@@ -403,7 +402,6 @@ jobs:
       stack: rails
       run-brakeman: true
       run-sorbet-rbi: true
-      linear-fallback: true
       lint-commands: |
         bin/rubocop
         npm run lint
@@ -414,7 +412,6 @@ jobs:
       additional-allowed-tools: 'Bash(bin/rspec:*),Bash(npm run test:run:*)'
     secrets:
       claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-      linear-api-key: ${{ secrets.LINEAR_API_KEY }}
 ```
 
 ### Example — Ruby gem (standard_id, standard_audit, standard_circuit)
@@ -438,14 +435,12 @@ jobs:
     with:
       stack: ruby-gem
       ruby-version: '4.0.3'
-      linear-fallback: true
       lint-commands: |
         bundle exec rubocop
       test-commands: |
         bundle exec rspec
     secrets:
       claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-      linear-api-key: ${{ secrets.LINEAR_API_KEY }}
 ```
 
 ### Example — Node library (luminality-ui)
@@ -469,7 +464,6 @@ jobs:
     with:
       stack: node-lib
       node-version: '20'
-      linear-fallback: true
       lint-commands: |
         npm run lint
         npm run check
@@ -478,7 +472,6 @@ jobs:
         npm run build
     secrets:
       claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-      linear-api-key: ${{ secrets.LINEAR_API_KEY }}
 ```
 
 ### Example — Kotlin Multiplatform (luminality-app)
@@ -498,47 +491,68 @@ jobs:
     with:
       stack: kmp
       jdk-version: '17'
-      linear-fallback: true
       gradle-test-command: ./gradlew :composeApp:testDebugUnitTest
       additional-allowed-tools: 'Bash(./gradlew :composeApp:testDebugUnitTest:*)'
     secrets:
       claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-      linear-api-key: ${{ secrets.LINEAR_API_KEY }}
 ```
 
 ## `reusable-sentry-autofix.yml`
 
-Daily (or webhook-triggered) Sentry sweep. Picks the top unresolved Sentry
-issue for the project that does NOT already have an open or recently-closed
-auto-fix PR, hands it to Claude for triage, and — when the verdict is
-high-confidence — opens a draft PR with a minimal forward-fix. Validation
-mirrors the post-deploy-triage autofix composite: hard path blocklist
-(migrations, workflows, `config/credentials*`, `config/master.key`, lockfiles)
-plus a 50-line diff cap. Never merges. Always opens a draft for human review.
+Per-project Sentry sweep. Picks the top unresolved Sentry issue for the project
+that does NOT already have an open or recently-closed auto-fix PR, hands it to
+Claude for triage, and — when the verdict is high-confidence — opens a PR with a
+minimal forward-fix. Validation mirrors the post-deploy-triage autofix
+composite: hard path blocklist (migrations, workflows, `config/credentials*`,
+`config/master.key`, lockfiles) plus a 50-line diff cap. Never merges.
+
+When the autofix path does NOT open a PR — `mode: triage-only`, the gate didn't
+pass (low confidence / no suspect files / not actionable), or the apply produced
+no valid diff — the workflow files a **deduplicated GitHub issue** (label
+`sentry-autofix`) so the finding isn't dropped. (This replaced the former Linear
+fallback.) Target:
+
+- **`followup-issue-repo` unset** → files in the caller repo via `GITHUB_TOKEN`
+  (requires Issues enabled there).
+- **`followup-issue-repo: owner/name`** → files in a central tracker via a
+  cross-repo release-bot token (issues:write). The rarebit-one callers set this
+  to `rarebit-one/rarebit-sre`. The tracker's open `sentry-autofix` issues are
+  also what the sweep dedups against, so a non-autofixable issue is filed once
+  and not re-dispatched.
+
+Either way it degrades gracefully: when the issue can't be created (Issues
+disabled, no cross-repo token), the would-be body is captured in the run summary.
 
 The fetch step queries Sentry for the project's top issues, then dedups against
 auto-fix PRs by matching the HTML marker `<!-- sentry-autofix: <SHORT_ID> -->`
 in PR bodies (open + closed within `dedup-window-days`). That same marker is
 stamped into every autofix PR opened by this workflow, closing the loop.
 
+Consumers do NOT schedule themselves: the daily cadence is owned by the central
+sweep in `rarebit-sre` (`sentry-sweep.yml`), which fetches + dedups across all
+projects and only `repository_dispatch`es `sentry-autofix` to the repos with an
+actionable candidate, so the heavy per-repo toolchain runs only when there's
+something to fix.
+
 ### Inputs
 
 | Input | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `sentry-org` | string | no | `sidekick-labs` | Sentry organization slug. |
+| `sentry-org` | string | no | `rarebit-one` | Sentry organization slug. |
 | `sentry-project` | string | yes | — | Sentry project slug (e.g. `luminality-web`). |
 | `stack` | string | yes | — | One of `rails`, `ruby-gem`, `node-lib`, `node-app`, `kmp`. Drives toolchain setup for the apply step. |
-| `mode` | string | no | `autofix` | `autofix` attempts a PR when triage is high-confidence; `triage-only` skips the apply step. `stack: kmp` always forces `triage-only`. |
+| `mode` | string | no | `autofix` | `autofix` attempts a PR when triage is high-confidence; `triage-only` skips the apply step and only files a GitHub issue. All stacks (incl. `kmp`) support `autofix`. |
 | `max-candidates` | number | no | `10` | Top N Sentry issues considered before dedup filtering. Only ONE is triaged per run. |
 | `issue-query` | string | no | `is:unresolved` | Sentry search query. Append modifiers (e.g. `is:unresolved level:error`) to narrow. |
 | `ruby-version-file` | string | no | `.ruby-version` | Ruby version file (rails, ruby-gem stacks). |
 | `ruby-version` | string | no | `""` | Explicit ruby-version override. |
 | `node-version` | string | no | `lts/*` | Node version (rails, node-lib, node-app stacks). |
-| `lint-commands` | string | no | `""` | Multiline lint commands run post-apply. All must exit 0 or the fix is rejected. Keep fast. |
+| `jdk-version` | string | no | `17` | JDK version for the `kmp` stack apply path (JDK + Gradle are set up so `lint-commands` like `./gradlew ktlintCheck` can run). |
+| `lint-commands` | string | no | `""` | Multiline lint commands run post-apply. All must exit 0 or the fix is rejected. Keep fast — for `kmp`, prefer lint only (a full Gradle test run risks the job timeout). |
 | `test-commands` | string | no | `""` | Multiline test commands run post-apply. Use a focused subset, not the full suite — runs daily. |
-| `linear-fallback` | boolean | no | `false` | When true, opens a Linear issue for triage-only runs and for autofix-skipped candidates. Requires `linear-api-key`. |
 | `diff-line-cap` | number | no | `50` | Hard cap on total insertions+deletions in the apply diff. |
 | `dedup-window-days` | number | no | `30` | How far back to scan closed PRs for the autofix marker. |
+| `followup-issue-repo` | string | no | `""` | Where to file the non-autofixable GitHub-issue fallback. Empty = caller repo via `GITHUB_TOKEN` (needs Issues enabled). An `owner/name` (e.g. `rarebit-one/rarebit-sre`) files in a central tracker via a cross-repo release-bot token — requires the App installed there with `issues:write`. |
 | `timeout-minutes` | number | no | `30` | Job-level timeout. |
 | `claude-timeout-minutes` | number | no | `15` | Advisory — composite-action steps can't enforce this; job timeout is the hard bound. |
 | `additional-allowed-tools` | string | no | `""` | Comma-separated entries appended to the apply step `--allowed-tools` (e.g. `Bash(bin/rspec:*)`). **Note:** entries are passed through unsanitised, and entries like `Bash(...)` widen Claude's blast radius beyond the default `Read,Edit,Grep,Glob`. Use sparingly and prefer tightly-scoped wildcards. |
@@ -550,8 +564,7 @@ stamped into every autofix PR opened by this workflow, closing the loop.
 |---|---|---|
 | `claude-code-oauth-token` | yes | OAuth token for `anthropics/claude-code-action`. |
 | `sentry-api-token` | yes | **Read-scoped** Sentry token (`event:read` + `project:read`). NOT the deploy-release write token. See "Setting up `SENTRY_API_TOKEN`" below. |
-| `linear-api-key` | no | Required only when `linear-fallback: true`. |
-| `release-bot-private-key` | no | GitHub App private key (.pem contents). Required together with `release-bot-client-id` to bypass the GITHUB_TOKEN event-suppression rule. See "Setting up the auto-fix bot" below. |
+| `release-bot-private-key` | no | GitHub App private key (.pem contents). Required together with `release-bot-client-id` to bypass the GITHUB_TOKEN event-suppression rule, and for the cross-repo `followup-issue-repo` token. See "Setting up the auto-fix bot" below. |
 
 ### Triggers
 
@@ -579,7 +592,8 @@ jobs:
     with:
       sentry-project: luminality-web
       stack: rails
-      linear-fallback: true
+      # Non-autofixable findings are filed in the central tracker (rarebit-sre).
+      followup-issue-repo: rarebit-one/rarebit-sre
       # Open auto-fix PRs as ready-for-review via the rarebit-release-bot
       # App so CI fires automatically. Without these two, the PR opens as
       # a draft and needs a human nudge.
@@ -592,7 +606,6 @@ jobs:
     secrets:
       claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       sentry-api-token: ${{ secrets.SENTRY_API_TOKEN }}
-      linear-api-key: ${{ secrets.LINEAR_API_KEY }}
       release-bot-private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
 ```
 
@@ -616,7 +629,7 @@ jobs:
       sentry-project: luminality-web
       stack: node-app
       node-version: '24'
-      linear-fallback: true
+      followup-issue-repo: rarebit-one/rarebit-sre
       # Open auto-fix PRs as ready-for-review via the rarebit-release-bot
       # App so CI fires automatically.
       release-bot-client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
@@ -626,7 +639,6 @@ jobs:
     secrets:
       claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       sentry-api-token: ${{ secrets.SENTRY_API_TOKEN }}
-      linear-api-key: ${{ secrets.LINEAR_API_KEY }}
       release-bot-private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
 ```
 
@@ -649,22 +661,19 @@ jobs:
     with:
       sentry-project: nutripod-web
       stack: ruby-gem
-      linear-fallback: true
+      followup-issue-repo: rarebit-one/rarebit-sre
       lint-commands: |
         bundle exec rubocop
     secrets:
       claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       sentry-api-token: ${{ secrets.SENTRY_API_TOKEN }}
-      linear-api-key: ${{ secrets.LINEAR_API_KEY }}
 ```
 
-### Example — KMP / Android (triage-only)
+### Example — KMP / Android (autofix)
 
 ```yaml
-name: Sentry Triage
+name: Sentry Autofix
 on:
-  schedule:
-    - cron: '37 8 * * *'
   workflow_dispatch:
   repository_dispatch:
     types: [sentry-autofix]
@@ -672,20 +681,28 @@ on:
 permissions: {}
 
 jobs:
-  sentry-triage:
+  sentry-autofix:
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
     uses: rarebit-one/.github/.github/workflows/reusable-sentry-autofix.yml@v2
     with:
       sentry-project: luminality-app
-      # `stack: kmp` is accepted but no toolchain is installed — KMP is
-      # triage-only in v1 (no autofix path), so the JDK/Gradle setup that
-      # would be needed for an apply step is intentionally omitted.
       stack: kmp
-      mode: triage-only
-      linear-fallback: true
+      # KMP sets up JDK + Gradle for the apply path. Keep the gate to lint
+      # only — a full Gradle test run is too slow for a sweep and risks the
+      # job timeout. Compose/KMP diffs are bounded by the same path blocklist
+      # + 50-line cap + human review gate as every stack.
+      followup-issue-repo: rarebit-one/rarebit-sre
+      release-bot-client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
+      lint-commands: |
+        ./gradlew ktlintCheck
     secrets:
       claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       sentry-api-token: ${{ secrets.SENTRY_API_TOKEN }}
-      linear-api-key: ${{ secrets.LINEAR_API_KEY }}
+      release-bot-private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
 ```
 
 ### Setting up the auto-fix bot
