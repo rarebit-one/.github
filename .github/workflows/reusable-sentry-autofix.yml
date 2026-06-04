@@ -966,7 +966,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          TITLE=$(jq -r '.title // ""' /tmp/triage.json | head -c 100)
+          TITLE=$(jq -r '.title // ""' /tmp/triage.json)
+          TITLE=${TITLE:0:100}  # char-based truncation (head -c counts bytes and can split a multibyte char)
           PERMALINK=$(jq -r '.sentry_permalink // ""' /tmp/triage.json)
           FIX_SUMMARY=$(jq -r '.fix_summary // ""' /tmp/triage.json)
           MARKER="${AUTOFIX_MARKER_PREFIX}${SHORT_ID} -->"
@@ -1095,6 +1096,9 @@ jobs:
         # extra permission requirement never affects the PR flow.
         # continue-on-error: a missing/under-scoped App degrades to the
         # step-summary capture below rather than failing the run.
+        # NOTE: the mint is scoped to the CALLER's owner (github.repository_owner),
+        # so `followup-issue-repo` must live under the caller's org — a tracker
+        # in another org silently degrades to the step-summary capture.
         id: followup_token
         if: >-
           steps.fetch.outputs.candidate_count != '0' &&
@@ -1137,7 +1141,8 @@ jobs:
           IFS=$'\t' read -r SHORT_ID VERDICT CONFIDENCE < <(
             jq -r '[.sentry_short_id // "", .verdict // "", .confidence // ""] | @tsv' /tmp/triage.json
           )
-          TITLE=$(jq -r '.title // ""' /tmp/triage.json | head -c 100)
+          TITLE=$(jq -r '.title // ""' /tmp/triage.json)
+          TITLE=${TITLE:0:100}  # char-based truncation (head -c counts bytes and can split a multibyte char)
           PERMALINK=$(jq -r '.sentry_permalink // ""' /tmp/triage.json)
           FIX_SUMMARY=$(jq -r '.fix_summary // ""' /tmp/triage.json)
 
@@ -1160,6 +1165,8 @@ jobs:
           export GH_TOKEN
 
           ISSUE_TITLE="Sentry: ${SHORT_ID} — ${TITLE}"
+          # Stamped into the body AND matched by the dedup below — keep in sync.
+          MARKER="<!-- sentry-autofix-followup: ${SHORT_ID} -->"
           BODY_FILE="${RUNNER_TEMP:-/tmp}/followup-issue.md"
           {
             echo "A Sentry sweep of \`${PROJECT}\` triaged this issue but the autofix path did not open a PR (triage-only, gate not passed, or no valid minimal fix). Filing for human pick-up."
@@ -1178,7 +1185,7 @@ jobs:
               echo "</details>"
               echo ""
             fi
-            echo "<!-- sentry-autofix-followup: ${SHORT_ID} -->"
+            echo "$MARKER"
           } > "$BODY_FILE"
 
           # If the target is a tracker but we have no token, the mint failed —
@@ -1189,9 +1196,16 @@ jobs:
             exit 0
           fi
 
-          # Dedup: skip if an open issue in the target already tracks this shortId.
+          # Dedup: skip if an open issue in the target already tracks this
+          # shortId. Match on the body marker (symmetric with the PR-path
+          # dedup) via a label-filtered list — unlike `--search`, the plain
+          # issues API isn't behind the eventually-consistent search index,
+          # so two dispatches in quick succession can't both see "no existing
+          # issue" and double-file.
           EXISTING=$(gh issue list --repo "$TARGET_REPO" --state open \
-            --search "${SHORT_ID} in:title" --json number --jq '.[0].number // empty' 2>/dev/null || true)
+            --label sentry-autofix --limit 200 --json number,body 2>/dev/null \
+            | jq -r --arg marker "$MARKER" \
+                '[.[] | select(.body // "" | contains($marker))][0].number // empty' || true)
           if [ -n "$EXISTING" ]; then
             echo "Open issue #${EXISTING} in ${TARGET_REPO} already tracks ${SHORT_ID} — skipping."
             exit 0

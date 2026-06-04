@@ -517,8 +517,9 @@ fallback.) Target:
 - **`followup-issue-repo: owner/name`** → files in a central tracker via a
   cross-repo release-bot token (issues:write). The rarebit-one callers set this
   to `rarebit-one/rarebit-sre`. The tracker's open `sentry-autofix` issues are
-  also what the sweep dedups against, so a non-autofixable issue is filed once
-  and not re-dispatched.
+  also what the sweep dedups against — matched on the body marker
+  `<!-- sentry-autofix-followup: <SHORT_ID> -->`, mirroring the PR-path marker
+  dedup — so a non-autofixable issue is filed once and not re-dispatched.
 
 Either way it degrades gracefully: when the issue can't be created (Issues
 disabled, no cross-repo token), the would-be body is captured in the run summary.
@@ -548,11 +549,11 @@ something to fix.
 | `ruby-version` | string | no | `""` | Explicit ruby-version override. |
 | `node-version` | string | no | `lts/*` | Node version (rails, node-lib, node-app stacks). |
 | `jdk-version` | string | no | `17` | JDK version for the `kmp` stack apply path (JDK + Gradle are set up so `lint-commands` like `./gradlew ktlintCheck` can run). |
-| `lint-commands` | string | no | `""` | Multiline lint commands run post-apply. All must exit 0 or the fix is rejected. Keep fast — for `kmp`, prefer lint only (a full Gradle test run risks the job timeout). |
+| `lint-commands` | string | no | `""` | Multiline lint commands run post-apply. All must exit 0 or the fix is rejected. Keep fast — for `kmp`, prefer lint only (a full Gradle test run risks the job timeout). **For `kmp` this gate is load-bearing, not optional**: there is no longer a stack-specific force-downgrade to triage-only, so beyond the shared path-blocklist + diff cap + human review, the lint gate is the only KMP-specific safety net — always pass at least `./gradlew ktlintCheck`. |
 | `test-commands` | string | no | `""` | Multiline test commands run post-apply. Use a focused subset, not the full suite — runs daily. |
 | `diff-line-cap` | number | no | `50` | Hard cap on total insertions+deletions in the apply diff. |
 | `dedup-window-days` | number | no | `30` | How far back to scan closed PRs for the autofix marker. |
-| `followup-issue-repo` | string | no | `""` | Where to file the non-autofixable GitHub-issue fallback. Empty = caller repo via `GITHUB_TOKEN` (needs Issues enabled). An `owner/name` (e.g. `rarebit-one/rarebit-sre`) files in a central tracker via a cross-repo release-bot token — requires the App installed there with `issues:write`. |
+| `followup-issue-repo` | string | no | `""` | Where to file the non-autofixable GitHub-issue fallback. Empty = caller repo via `GITHUB_TOKEN` (needs Issues enabled). An `owner/name` (e.g. `rarebit-one/rarebit-sre`) files in a central tracker via a cross-repo release-bot token — requires the App installed there with `issues:write`, and the tracker **must live under the caller's org** (the token mint is scoped to `github.repository_owner`; a tracker in another org silently degrades to the run-summary capture). |
 | `timeout-minutes` | number | no | `30` | Job-level timeout. |
 | `claude-timeout-minutes` | number | no | `15` | Advisory — composite-action steps can't enforce this; job timeout is the hard bound. |
 | `additional-allowed-tools` | string | no | `""` | Comma-separated entries appended to the apply step `--allowed-tools` (e.g. `Bash(bin/rspec:*)`). **Note:** entries are passed through unsanitised, and entries like `Bash(...)` widen Claude's blast radius beyond the default `Read,Edit,Grep,Glob`. Use sparingly and prefer tightly-scoped wildcards. |
