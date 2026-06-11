@@ -2,8 +2,7 @@ name: Deploy to DigitalOcean App Platform
 description: >-
   Patch a live DO App Platform appspec to a DOCR image pinned at a given SHA,
   apply it, and poll the resulting deployment to a terminal phase. Backs the
-  DOCR-image deploy model for the rarebit-one web apps (luminality-web,
-  nutripod-web) — the caller builds + pushes the image to DOCR, then invokes
+  DOCR-image deploy model for the rarebit-one web apps (nutripod-web) — the caller builds + pushes the image to DOCR, then invokes
   this action to point the live app at that tag and wait for the rollout.
   Mirrored verbatim into fundbright/.github for fundbright-web (separate org);
   update both copies together.
@@ -31,7 +30,7 @@ inputs:
     description: DigitalOcean App Platform app ID (e.g. vars.DO_STAGING_APP_ID).
     required: true
   image_repo:
-    description: DOCR repository name to pin every component to (e.g. luminality-web).
+    description: DOCR repository name to pin every component to (e.g. nutripod-web).
     required: true
   deploy_sha:
     description: Commit SHA (or tag) to set as the image tag on every component.

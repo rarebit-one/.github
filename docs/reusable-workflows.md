@@ -382,7 +382,7 @@ A run does the following:
   scoped per `repository_id`; week-over-week delta surfaces in `$GITHUB_STEP_SUMMARY`
   and in the PR body.
 
-### Example — Rails app (luminality-web, fundbright-web, nutripod-web)
+### Example — Rails app (fundbright-web, nutripod-web)
 
 ```yaml
 name: Weekly Maintenance
@@ -445,7 +445,7 @@ jobs:
       claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 ```
 
-### Example — Node library (luminality-ui)
+### Example — Node library
 
 ```yaml
 name: Weekly Maintenance
@@ -476,7 +476,7 @@ jobs:
       claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 ```
 
-### Example — Kotlin Multiplatform (luminality-app)
+### Example — Kotlin Multiplatform
 
 ```yaml
 name: Weekly Maintenance

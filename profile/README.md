@@ -4,7 +4,6 @@ Production Rails apps and the Ruby gems that support them.
 
 ## Apps
 
-- **luminality-web** — AI-powered mindfulness journeys (Rails 8 + React 19 via Inertia)
 - **nutripod-web** — vending-machine ops e-commerce (Rails 8 + React 19 via Inertia)
 - **fundbright-web** — lending platform (Rails 8 + React 19 via Inertia)
 
