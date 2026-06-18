@@ -194,7 +194,7 @@ on:
 
 jobs:
   release:
-    uses: rarebit-one/.github/.github/workflows/reusable-gem-release.yml@v1
+    uses: rarebit-one/.github/.github/workflows/reusable-gem-release.yml@v2
     with:
       gem-name: standard_id
 ```
@@ -215,7 +215,7 @@ on:
 
 jobs:
   release:
-    uses: rarebit-one/.github/.github/workflows/reusable-gem-release.yml@v1
+    uses: rarebit-one/.github/.github/workflows/reusable-gem-release.yml@v2
     with:
       gem-name: ground_control-inertia
       sibling-checkouts: |

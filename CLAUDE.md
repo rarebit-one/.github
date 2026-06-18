@@ -39,8 +39,8 @@ Consumers pin to a **moving major tag** (or a specific SHA) rather than `@main`,
 
 | Ref | Workflows |
 |-----|-----------|
-| `@v1` | `reusable-gem-ci`, `reusable-gem-release`, `sentry-release` |
-| `@v2` | `reusable-weekly-maintenance`, `reusable-maven-central-release` |
+| `@v1` | `reusable-gem-ci`, `sentry-release` |
+| `@v2` | `reusable-gem-release`, `reusable-weekly-maintenance`, `reusable-maven-central-release` |
 | `@main` | `claude-agent`, `claude-code-review`, `deploy-production` (low-contract dispatchers; changes go live immediately on merge) |
 
 Because changes ripple across all consumers, test against at least one downstream consumer (e.g. a standard_* gem) before re-pointing a tag. There is no equivalent of `/rollout-gem` for these workflows.
