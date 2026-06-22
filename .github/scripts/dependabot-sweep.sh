@@ -30,11 +30,14 @@ echo "::endgroup::"
 declare -a READY=() BEHIND=()
 for row in "${ROWS[@]}"; do
   repo="${row%%$'\t'*}"; n="${row##*$'\t'}"
-  IFS=$'\t' read -r decision state mergeable < <(gh pr view "$n" -R "$repo" \
-    --json reviewDecision,mergeStateStatus,mergeable \
-    --jq '[.reviewDecision // "NONE", .mergeStateStatus, .mergeable]|@tsv')
-  # Gate: act only on PRs the per-PR auto-merge already approved (minor/patch).
-  if [ "$decision" != "APPROVED" ]; then echo "skip $repo#$n — not approved ($decision)"; continue; fi
+  IFS=$'\t' read -r armed state mergeable < <(gh pr view "$n" -R "$repo" \
+    --json autoMergeRequest,mergeStateStatus,mergeable \
+    --jq '[(if .autoMergeRequest then "armed" else "no" end), .mergeStateStatus, .mergeable]|@tsv')
+  # Gate: act only on PRs the per-PR auto-merge already ARMED (= it confirmed
+  # minor/patch + approved). reviewDecision is unreliable here (0 required
+  # reviewers leaves it null even after the bot approves), so arming is the
+  # durable signal. Majors are never armed → skipped.
+  if [ "$armed" != "armed" ]; then echo "skip $repo#$n — not armed by per-PR gate"; continue; fi
   if [ "$mergeable" != "MERGEABLE" ]; then echo "skip $repo#$n — $mergeable/$state"; continue; fi
   case "$state" in
     CLEAN)  READY+=("$repo#$n") ;;
