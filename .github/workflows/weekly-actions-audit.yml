@@ -65,8 +65,8 @@ jobs:
     steps:
       - name: Validate inputs
         env:
-          SCOPE: ${{ inputs.scope }}
-          WINDOW: ${{ inputs.window }}
+          SCOPE: ${{ inputs.scope || 'auto' }}
+          WINDOW: ${{ inputs.window || '7' }}
         run: |
           set -euo pipefail
           case "$SCOPE" in
@@ -139,8 +139,8 @@ jobs:
           GH_TOKEN: ${{ steps.app_token.outputs.token }}
           AUDIT_ORG: rarebit-one
           AUDIT_TRACKER_REPO: rarebit-one/rarebit-sre
-          SCOPE: ${{ inputs.scope }}
-          WINDOW: ${{ inputs.window }}
+          SCOPE: ${{ inputs.scope || 'auto' }}
+          WINDOW: ${{ inputs.window || '7' }}
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/tmp/audit" .audit-cache
