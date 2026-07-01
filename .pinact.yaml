@@ -1,6 +1,19 @@
 version: 3
 ignore_actions:
+  # First-party org actions/reusables are consumed at a moving ref (@main / @vN)
+  # by design — they live in this org, so the compromised-tag supply-chain risk
+  # a SHA pin defends against doesn't apply the way it does for third-party ones.
   - name: rarebit-one/.*
     ref: .*
+  # Local composite actions (./.github/actions/*) have no upstream ref to pin.
   - name: \./.*
+    ref: .*
+  # anthropics/claude-code-action is deliberately SHA-pinned to a *main-branch*
+  # commit (ahead of the latest release, for a thinking-block 400 fix — see
+  # rarebit-ops#119), annotated `# main@<ver>` rather than `# v<semver>`. It IS
+  # SHA-pinned (zizmor's unpinned-uses still enforces that); we only exempt it
+  # from pinact's semver-comment check, which false-fails on the `main@` comment
+  # and would otherwise try to "correct" the deliberate main pin back to a
+  # tagged release. Keep this block identical across every org's .pinact.yaml.
+  - name: anthropics/claude-code-action
     ref: .*
