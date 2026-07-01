@@ -23,7 +23,9 @@ Then work inside `.worktrees/<name>/` for the rest of the session.
 - `.github/workflows/claude-agent.yml` — issue-triggered Claude PR agent
 - `.github/workflows/claude-code-review.yml` — PR-triggered Claude review bot
 - `.github/workflows/codeql-actions.yml` — CodeQL scanning for the Actions language
-- `.github/workflows/pr.yml`, `deploy-production.yml`, `sentry-release.yml` — callers/dispatchers
+- `.github/workflows/pin-check.yml` — reusable PR gate: fails on un-SHA-pinned third-party actions (zizmor + pinact)
+- `.github/workflows/pin-sweep.yml` — scheduled cross-repo self-healer: re-pins drift via `pinact run` and opens auto-merge PRs
+- `.github/workflows/pr.yml`, `pin-check-caller.yml`, `deploy-production.yml`, `sentry-release.yml` — callers/dispatchers
 
 See `docs/reusable-workflows.md` for the full input/output contract of each reusable workflow.
 

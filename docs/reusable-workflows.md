@@ -24,6 +24,76 @@ Available reusable workflows:
 > release-bot App token (rarebit-sre#5). Config lives in rarebit-sre's
 > `sources.yaml sentry.autofix`.
 
+## Actions-pinning self-healer
+
+Third-party GitHub Actions across the estate are SHA-pinned (via `pinact`,
+config `.pinact.yaml`). Three pieces keep that compliant over time:
+
+- **`pin-check.yml`** — a reusable (`workflow_call`) PR gate. It runs
+  [zizmor](https://docs.zizmor.sh) (the Actions security auditor) and blocks the
+  PR on its `unpinned-uses` finding, plus a second, config-aware `pinact --check`
+  (via `suzuki-shunsuke/pinact-action`, `fix: "false"`). zizmor's full audit is
+  surfaced as non-blocking log; only pinning blocks the merge. First-party org
+  actions pinned at `@main`/`@vN` are allowed — the gate reads the repo's
+  `.github/zizmor.yml` if present, else synthesizes an owner-scoped policy from
+  `github.repository_owner` (`<owner>/*: ref-pin`, `*: hash-pin`), so it's
+  portable to any org with no per-repo config.
+
+  Consume it from a PR workflow (see `pin-check-caller.yml` here for the
+  reference wiring):
+
+  ```yaml
+  jobs:
+    pin-check:
+      uses: rarebit-one/.github/.github/workflows/pin-check.yml@main
+  ```
+
+- **`pin-sweep.yml`** — a scheduled (`schedule` weekly + `workflow_dispatch`)
+  self-healer that lives only in this org `.github` repo. It enumerates every
+  non-archived org repo (via the release-bot App token), runs `pinact run` on
+  each honoring that repo's `.pinact.yaml` (seeding the org-standard one where
+  it's missing), and — if pinact produces a diff — opens a squash-auto-merge PR
+  on that repo with the fix. Auth + cross-repo mechanics mirror rarebit-sre's
+  `ci-fix-sweep.yml`: `actions/create-github-app-token`
+  (`vars.RELEASE_BOT_CLIENT_ID` + `secrets.RELEASE_BOT_PRIVATE_KEY`), a repo
+  matrix, per-target checkout, and a server-signed commit created via the API
+  (push to the `pin-fix/*` branch is unsigned, then HEAD is replaced with a
+  signed commit and the ref re-pointed) so PRs land even on
+  require-signed-commits repos. `workflow_dispatch` supports `dry_run` (plan
+  only) and `only_repo` (scope to one repo for validation).
+
+- **Dependabot `github-actions`** — this repo's `.github/dependabot.yml` already
+  enables the weekly `github-actions` ecosystem, so the pinned SHAs get bumped
+  as new releases land. **Fan-out note:** each consumer repo needs this same
+  `github-actions` block in its *own* `.github/dependabot.yml` — the sweep pins,
+  Dependabot freshens; they're complementary.
+
+### The `anthropics/claude-code-action` exemption (org convention)
+
+We pin `anthropics/claude-code-action` to a **main-branch commit** (ahead of the
+latest release, for a thinking-block 400 fix — see rarebit-ops#119), annotated
+`# main@<version>` rather than `# v<semver>`. `pinact --check` flags that comment
+style as a missing semver comment and would try to "correct" the deliberate main
+pin. The consistent handling, applied in **every org's `.pinact.yaml`**, is to
+list it under `ignore_actions`:
+
+```yaml
+version: 3
+ignore_actions:
+  - name: rarebit-one/.*        # first-party org actions (moving @main/@vN OK)
+    ref: .*
+  - name: \./.*                 # local composite actions (no upstream ref)
+    ref: .*
+  - name: anthropics/claude-code-action
+    ref: .*
+```
+
+This **only** exempts it from `pinact`'s semver-comment nit. It stays SHA-pinned,
+and zizmor's `unpinned-uses` still enforces that it's a full SHA — so the
+supply-chain guarantee is intact; we've only silenced a false "correct me" from
+the semver-comment heuristic. Replicate this block verbatim when fanning the
+self-healer out to the other orgs' `.github` repos.
+
 ## Claude model selection
 
 Every workflow that invokes `anthropics/claude-code-action` (`claude-agent`,
