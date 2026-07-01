@@ -29,4 +29,7 @@ jobs:
             actions: read
           # Pin the model so the interactive agent doesn't silently shift when
           # the action's default changes. Keep in lockstep with claude-code-review.yml.
-          claude_args: '--model ${{ env.CLAUDE_MODEL }}'
+          # --effort high: this is a coding/correctness lane (issue-triggered PR
+          # agent), so it hardcodes the high tier rather than reading the
+          # CLAUDE_EFFORT estate floor.
+          claude_args: '--model ${{ env.CLAUDE_MODEL }} --effort high'
