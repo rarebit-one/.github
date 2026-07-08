@@ -61,10 +61,10 @@ jobs:
         id: probe
         if: steps.detect.outputs.changed == 'true'
         continue-on-error: true
-        uses: anthropics/claude-code-action@ba0aafd4308cbba7165f9f2cdb0cfbed5a3c99ce  # v1.0.168 (lockstep-bumped by Dependabot with the repo's other cca pins)
+        uses: anthropics/claude-code-action@ba0aafd4308cbba7165f9f2cdb0cfbed5a3c99ce  # v1.0.168 [NEGATIVE-TEST forces changed=true — DO NOT MERGE]
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}          # pass a token so the action skips OIDC (unavailable to Dependabot runs)
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_code_oauth_token: "sk-ant-oat01-INVALID-NEGATIVE-TEST"
           track_progress: false
           prompt: |
             Auth smoke test — reply with exactly the single word: pong
