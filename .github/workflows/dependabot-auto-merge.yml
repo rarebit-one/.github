@@ -23,13 +23,18 @@ on:
 
 jobs:
   auto-merge:
-    # Act on Dependabot's own PRs and on autonomous SRE engine PRs (identified
-    # by their head-ref prefix).
+    # Act on Dependabot's own PRs and on autonomous SRE engine PRs. The engine
+    # path is gated on BOTH the release-bot App actor AND the head-ref prefix:
+    # the actor gate closes a branch-name spoofing hole — otherwise anyone able
+    # to push a `ci-fix/*` (etc.) branch would get native auto-merge enabled on
+    # their PR (landing on required-checks-green with no human review). Only the
+    # release-bot App opens genuine engine PRs, so require its login too.
     if: >-
       github.actor == 'dependabot[bot]' ||
-      startsWith(github.event.pull_request.head.ref, 'issue-worker/') ||
-      startsWith(github.event.pull_request.head.ref, 'ci-fix/') ||
-      startsWith(github.event.pull_request.head.ref, 'sentry-autofix/')
+      (github.actor == 'rarebit-one[bot]' && (
+        startsWith(github.event.pull_request.head.ref, 'issue-worker/') ||
+        startsWith(github.event.pull_request.head.ref, 'ci-fix/') ||
+        startsWith(github.event.pull_request.head.ref, 'sentry-autofix/')))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -56,7 +61,9 @@ jobs:
           gh pr merge --auto --squash "$PR_URL" || echo "::warning::auto-merge not enabled for $PR_URL"
 
       - name: Enable auto-merge — autonomous SRE engine PR
-        if: github.actor != 'dependabot[bot]'
+        # Actor-gated (not just `!= dependabot[bot]`) so a spoofed engine-prefix
+        # branch from any other actor can't reach this step.
+        if: github.actor == 'rarebit-one[bot]'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
