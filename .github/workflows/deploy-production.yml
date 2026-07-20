@@ -17,6 +17,13 @@ on:
         required: false
         type: string
         default: ""
+      # Workflow file whose main-branch run must be green for the target SHA.
+      # Repos whose CI workflow isn't ci.yml (e.g. jumpdrive-web's test.yml)
+      # pass their own.
+      ci_workflow:
+        required: false
+        type: string
+        default: "ci.yml"
 
 # Never cancel an in-progress promotion
 concurrency:
@@ -74,7 +81,7 @@ jobs:
           CONCLUSION=""
           for i in 1 2 3; do
             CONCLUSION=$(gh run list \
-              --workflow=ci.yml \
+              --workflow="${{ inputs.ci_workflow }}" \
               --branch=main \
               --json headSha,conclusion \
               --jq ".[] | select(.headSha == \"$SHA\") | .conclusion" \
