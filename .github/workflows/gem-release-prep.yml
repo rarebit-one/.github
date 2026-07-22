@@ -1,0 +1,289 @@
+name: Gem release prep
+
+# Preps releases for the standard_* gems so approving one is a single click.
+#
+# Weekly, for every gem: build the actual .gem at the last tag and at HEAD and
+# diff the payload (see .github/scripts/gem-packaged-drift.sh). Only a BEHAVIOUR
+# verdict — consumers would receive new code — gets a release PR. PACKAGING drift
+# (a renamed licence file, a README edit) rides along with the next real release
+# and never triggers one, per rarebit-one's gem-releases-and-ownership convention:
+# publishing a byte-identical artifact under a new number burns a version,
+# invalidates every consumer lockfile across four orgs, and teaches everyone that
+# a version bump carries no information.
+#
+# The PR arrives with the version bump, Gemfile.lock sync and CHANGELOG rollup
+# already done. Merging it is the approval: gem-release-tag.yml then tags the
+# merged commit, which fires each repo's existing release.yml -> RubyGems.
+#
+# Expect this to do nothing most weeks. These gems release on real feature work,
+# not on a schedule — as of 2026-07-22 there was zero BEHAVIOUR drift across all
+# of them. Silence here is the correct output, not a broken workflow.
+
+on:
+  schedule:
+    - cron: '0 22 * * 0'   # Mon 06:00 SGT = Sun 22:00 UTC — waiting when the week starts
+  workflow_dispatch:
+    inputs:
+      gems:
+        description: 'Space-separated gem repos to assess (default: all).'
+        required: false
+        type: string
+        default: ''
+      dry-run:
+        description: 'Assess and report, but do not open PRs.'
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: gem-release-prep
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: Discover gem repos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      gems: ${{ steps.list.outputs.gems }}
+    steps:
+      - name: Mint app token
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: rarebit-one
+          permission-contents: read
+          permission-metadata: read
+
+      - name: List gem repos
+        id: list
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REQUESTED: ${{ inputs.gems }}
+          # ground_control-* are archived (read-only); ktor-armour publishes to
+          # Maven Central, not RubyGems.
+          SKIP: 'ground_control-api ground_control-inertia rarebit-static-v2 ktor-armour'
+        run: |
+          set -euo pipefail
+          if [ -n "${REQUESTED:-}" ]; then
+            gems="$REQUESTED"
+          else
+            gems=''
+            for r in $(gh repo list rarebit-one --limit 100 --json name,isArchived \
+                        --jq '.[]|select(.isArchived|not)|.name' | sort); do
+              case " $SKIP " in *" $r "*) continue ;; esac
+              # A gem repo is one with a .gemspec at its root.
+              gh api "repos/rarebit-one/$r/contents" --jq '.[].name' 2>/dev/null \
+                | grep -q '\.gemspec$' && gems="$gems $r"
+            done
+          fi
+          echo "gems: $gems"
+          echo "gems=$(jq -cn --arg g "$gems" '$g|split(" ")|map(select(length>0))')" >> "$GITHUB_OUTPUT"
+
+  prep:
+    name: ${{ matrix.gem }}
+    needs: discover
+    if: ${{ needs.discover.outputs.gems != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        gem: ${{ fromJSON(needs.discover.outputs.gems) }}
+    outputs:
+      # Matrix jobs share one output slot, so if several gems were prepped in the
+      # same run this reports only the last to finish. Accepted deliberately:
+      # these gems release rarely and almost never together (zero were
+      # release-worthy across all of them on 2026-07-22), and each gem's PR is
+      # its own notification anyway. The alternative — aggregating via artifacts
+      # — is more machinery than the case warrants.
+      prepped: ${{ steps.pr.outputs.prepped }}
+    steps:
+      - name: Mint app token
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: rarebit-one
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Checkout scripts
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: .ci-scripts
+          fetch-depth: 1
+
+      - name: Checkout ${{ matrix.gem }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: rarebit-one/${{ matrix.gem }}
+          path: gem
+          token: ${{ steps.token.outputs.token }}
+          # Full history + tags: the drift check builds the gem at the last tag.
+          fetch-depth: 0
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@bb6434c747fa7022e12fa1cae9c0542717d0dc75 # v1.254.0
+        with:
+          working-directory: gem
+          ruby-version-file: gem/.ruby-version
+          bundler-cache: false
+
+      - name: Skip if a release PR is already open
+        id: guard
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GEM: ${{ matrix.gem }}
+        run: |
+          set -euo pipefail
+          # Without this the weekly run would reopen the same release PR every
+          # week while an earlier one sits unmerged.
+          existing=$(gh pr list --repo "rarebit-one/$GEM" --state open --limit 20 \
+                       --json number,title --jq '[.[]|select(.title|test("^chore: Release v"))]|length')
+          echo "open release PRs: $existing"
+          echo "skip=$([ "$existing" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Assess packaged-surface drift
+        id: drift
+        if: ${{ steps.guard.outputs.skip == 'false' }}
+        env:
+          REPO_DIR: gem
+        run: bash .ci-scripts/.github/scripts/gem-packaged-drift.sh
+
+      - name: Prepare release commit
+        id: prep
+        if: ${{ steps.guard.outputs.skip == 'false' && steps.drift.outputs.verdict == 'BEHAVIOUR' }}
+        working-directory: gem
+        env:
+          GEM: ${{ matrix.gem }}
+          NEXT: ${{ steps.drift.outputs.next }}
+        run: |
+          set -euo pipefail
+          # --- version file ---------------------------------------------------
+          # Name-to-path is not mechanical (standard_id-apple -> standard_id/apple),
+          # so find the file that actually defines VERSION rather than guessing.
+          vf=$(grep -rl --include='version.rb' -E '^\s*VERSION\s*=' lib | head -1)
+          [ -n "$vf" ] || { echo "::error::no version.rb defining VERSION"; exit 1; }
+          echo "version file: $vf"
+          sed -i -E "s/(VERSION\s*=\s*)[\"'][^\"']+[\"']/\1\"$NEXT\"/" "$vf"
+          grep -E "VERSION\s*=" "$vf"
+
+          # --- changelog ------------------------------------------------------
+          # Insert the new version heading directly under [Unreleased] so the
+          # existing unreleased entries become this release's notes.
+          if [ -f CHANGELOG.md ] && grep -q '^## \[Unreleased\]' CHANGELOG.md; then
+            awk -v v="$NEXT" -v d="$(date -u +%Y-%m-%d)" '
+              !done && /^## \[Unreleased\]/ { print; print ""; print "## [" v "] - " d; done=1; next }
+              { print }' CHANGELOG.md > CHANGELOG.tmp && mv CHANGELOG.tmp CHANGELOG.md
+          fi
+
+          # --- lockfile -------------------------------------------------------
+          # The PATH block pins the gem's own version; a stale lockfile fails CI
+          # on the release PR. Bundler does NOT always rewrite it after a pure
+          # version bump, so verify rather than trusting the exit code.
+          if [ -f Gemfile.lock ]; then
+            BUNDLE_FROZEN=false bundle lock --update="$GEM" >/dev/null 2>&1 || BUNDLE_FROZEN=false bundle lock >/dev/null 2>&1 || true
+            if ! grep -qE "^\s+$GEM \($NEXT\)" Gemfile.lock; then
+              echo "::error::Gemfile.lock did not pick up $NEXT — refusing to open a PR that would fail CI"
+              exit 1
+            fi
+            echo "lockfile synced to $NEXT"
+          fi
+
+      - name: Open release PR
+        id: pr
+        if: ${{ steps.guard.outputs.skip == 'false' && steps.drift.outputs.verdict == 'BEHAVIOUR' && !inputs.dry-run }}
+        working-directory: gem
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GEM: ${{ matrix.gem }}
+          CURRENT: ${{ steps.drift.outputs.current }}
+          NEXT: ${{ steps.drift.outputs.next }}
+          BUMP: ${{ steps.drift.outputs.bump }}
+          DELTA: ${{ steps.drift.outputs.delta }}
+        run: |
+          set -euo pipefail
+          branch="chore/release-v$NEXT"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add -A
+          git commit -m "chore: Release v$NEXT"
+          git push -u origin "$branch"
+
+          body=$(cat <<EOF
+          ## Release v$NEXT
+
+          Prepped automatically — **merging this PR publishes the gem.** The merge
+          is tagged by \`gem-release-tag.yml\`, which fires this repo's
+          \`release.yml\` and pushes to RubyGems via the trusted publisher.
+
+          | | |
+          |---|---|
+          | Current | \`$CURRENT\` |
+          | Proposed | \`$NEXT\` (**$BUMP**) |
+
+          ### Why this is release-worthy
+
+          The packaged \`.gem\` was built at \`v$CURRENT\` and at \`HEAD\` and the
+          payloads differ **inside \`lib/\`** — consumers would receive new code.
+          (Drift confined to licence files or the README is classed \`PACKAGING\`
+          and never opens a PR.)
+
+          \`\`\`
+          $DELTA
+          \`\`\`
+
+          ### Before merging
+
+          - Confirm the CHANGELOG entry answers "what does a consumer get from this?"
+          - Confirm the bump size. All these gems are pre-1.0, so a breaking change
+            takes the **minor** slot, not major.
+
+          After it publishes, roll the version out with \`/rollout-gem $GEM $NEXT\`.
+          EOF
+          )
+          gh pr create --repo "rarebit-one/$GEM" --head "$branch" \
+            --title "chore: Release v$NEXT" --body "$body"
+          echo "prepped=$GEM v$NEXT ($BUMP)" >> "$GITHUB_OUTPUT"
+
+  narrate:
+    name: Narrate
+    needs: [discover, prep]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post Slack summary
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          CHANNEL: ${{ vars.SLACK_RELEASE_CHANNEL_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PREPPED: ${{ needs.prep.outputs.prepped }}
+        run: |
+          set -euo pipefail
+          # Silent unless a release was actually prepped. Most weeks nothing is
+          # release-worthy, and a weekly "nothing to do" post is exactly the kind
+          # of noise that gets a channel muted.
+          if [ -z "${PREPPED:-}" ]; then
+            echo "nothing prepped — no post."; exit 0
+          fi
+          if [ -z "${SLACK_BOT_TOKEN:-}" ] || [ -z "${CHANNEL:-}" ]; then
+            echo "::warning::Slack not configured — skipping."; exit 0
+          fi
+          TEXT=$(printf ':package: *Gem release prepped* — review and merge to publish\n%s\n<%s|run log>' "$PREPPED" "$RUN_URL")
+          RESP=$(curl -fsS -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H 'Content-type: application/json; charset=utf-8' \
+            -d "$(jq -n --arg c "$CHANNEL" --arg t "$TEXT" \
+                  '{channel:$c, text:$t, unfurl_links:false}')") \
+            || { echo "::warning::Slack request failed."; exit 0; }
+          [ "$(jq -r '.ok' <<<"$RESP")" = "true" ] \
+            && echo "posted." \
+            || echo "::warning::Slack post failed: $(jq -r '.error // "unknown"' <<<"$RESP")"
