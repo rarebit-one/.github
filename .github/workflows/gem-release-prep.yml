@@ -129,7 +129,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Ruby
-        uses: ruby/setup-ruby@bb6434c747fa7022e12fa1cae9c0542717d0dc75 # v1.254.0
+        uses: ruby/setup-ruby@003a5c4d8d6321bd302e38f6f0ec593f77f06600 # v1.319.0
         with:
           working-directory: gem
           ruby-version-file: gem/.ruby-version
