@@ -1,0 +1,141 @@
+name: Gem release tag
+
+# Tags a merged release PR so approving a release is one click.
+#
+# Each gem's release.yml fires on `push: tags: v*`. Before this workflow, that
+# tag was pushed by hand (the last manual step of /publish-gem), so merging a
+# release PR left the release half-done and easy to forget. This closes that gap:
+# merge the PR -> the tag appears -> release.yml builds, creates the GitHub
+# Release, and publishes to RubyGems via the trusted publisher.
+#
+# WHY POLLING, not a per-repo `pull_request: closed` trigger: tagging on merge
+# needs an event inside each gem repo, which would mean adding and maintaining a
+# caller workflow in nine repos. Polling keeps the whole mechanism in one place,
+# and self-heals — a tag missed because of a transient failure is created on the
+# next pass, whereas a missed event is gone. The cost is up to an hour of latency
+# on a publish, which is not a latency-sensitive operation.
+#
+# The tag is created with the release-bot App token, NOT GITHUB_TOKEN: pushes made
+# with GITHUB_TOKEN deliberately do not trigger further workflows, which would
+# leave the tag sitting there with release.yml never firing. App installation
+# tokens do trigger them.
+
+on:
+  schedule:
+    - cron: '17 * * * *'   # hourly, off the hour to dodge cron congestion
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Report what would be tagged without creating tags.'
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: gem-release-tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Tag merged releases
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Mint app token
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: rarebit-one
+          permission-contents: write
+          permission-metadata: read
+
+      - name: Tag any merged release commits
+        id: tag
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+          SKIP: 'ground_control-api ground_control-inertia rarebit-static-v2 ktor-armour'
+        run: |
+          set -euo pipefail
+          tagged=''
+          for repo in $(gh repo list rarebit-one --limit 100 --json name,isArchived \
+                          --jq '.[]|select(.isArchived|not)|.name' | sort); do
+            case " $SKIP " in *" $repo "*) continue ;; esac
+            gh api "repos/rarebit-one/$repo/contents" --jq '.[].name' 2>/dev/null \
+              | grep -q '\.gemspec$' || continue
+
+            # The tip of main is the merged release PR (squash-merged, so the
+            # subject is the PR title).
+            read -r sha subject < <(gh api "repos/rarebit-one/$repo/commits/HEAD" \
+              --jq '"\(.sha) \(.commit.message | split("\n")[0])"' 2>/dev/null || echo " ")
+            [ -n "${sha:-}" ] || continue
+
+            # Capture ONLY the semver. A squash merge appends the PR number to the
+            # subject ("chore: Release v0.2.0 (#29)"), so a trailing `.*` inside the
+            # capture group swallows it and yields the tag "v0.2.0 (#29)" — which no
+            # existence check would ever match, re-tagging an already-published gem
+            # on every pass.
+            version=$(sed -nE 's/^chore: Release v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?).*$/\1/p' <<<"$subject")
+            [ -n "$version" ] || continue
+
+            if gh api "repos/rarebit-one/$repo/git/ref/tags/v$version" >/dev/null 2>&1; then
+              continue   # already tagged — normal on every pass after the first
+            fi
+
+            # Guard: the commit must actually carry this version. Protects against
+            # tagging a revert, or a hand-written commit that merely borrows the
+            # subject line.
+            if ! gh api "repos/rarebit-one/$repo/git/trees/$sha?recursive=1" \
+                 --jq '.tree[].path' 2>/dev/null | grep -q 'version\.rb'; then
+              echo "::warning::$repo: no version.rb in tree — not tagging"
+              continue
+            fi
+            vfile=$(gh api "repos/rarebit-one/$repo/git/trees/$sha?recursive=1" \
+                      --jq '.tree[].path' | grep -E 'lib/.*version\.rb$' | head -1)
+            actual=$(gh api "repos/rarebit-one/$repo/contents/$vfile?ref=$sha" --jq '.content' \
+                      | base64 -d | sed -nE 's/.*VERSION[[:space:]]*=[[:space:]]*["'"'"']([^"'"'"']+)["'"'"'].*/\1/p' | head -1)
+            if [ "$actual" != "$version" ]; then
+              echo "::warning::$repo: subject says v$version but $vfile says $actual — not tagging"
+              continue
+            fi
+
+            echo "$repo: tagging v$version at ${sha:0:8}"
+            if [ "$DRY_RUN" = "true" ]; then
+              tagged="$tagged\n• $repo v$version (dry-run)"
+              continue
+            fi
+            if gh api --method POST "repos/rarebit-one/$repo/git/refs" \
+                 -f ref="refs/tags/v$version" -f sha="$sha" >/dev/null; then
+              tagged="$tagged\n• $repo v$version"
+            else
+              echo "::warning::$repo: failed to create tag v$version"
+            fi
+          done
+          if [ -n "$tagged" ]; then
+            { echo 'tagged<<EOF'; printf '%b\n' "$tagged"; echo EOF; } >> "$GITHUB_OUTPUT"
+          fi
+          printf 'result:%b\n' "${tagged:-\n(nothing to tag)}"
+
+      - name: Announce publishes
+        if: ${{ steps.tag.outputs.tagged != '' }}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          CHANNEL: ${{ vars.SLACK_RELEASE_CHANNEL_ID }}
+          TAGGED: ${{ steps.tag.outputs.tagged }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SLACK_BOT_TOKEN:-}" ] || [ -z "${CHANNEL:-}" ]; then
+            echo "::warning::Slack not configured — skipping."; exit 0
+          fi
+          TEXT=$(printf ':label: *Gem release tagged* — publishing to RubyGems now\n%s' "$TAGGED")
+          RESP=$(curl -fsS -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H 'Content-type: application/json; charset=utf-8' \
+            -d "$(jq -n --arg c "$CHANNEL" --arg t "$TEXT" '{channel:$c, text:$t, unfurl_links:false}')") \
+            || { echo "::warning::Slack request failed."; exit 0; }
+          [ "$(jq -r '.ok' <<<"$RESP")" = "true" ] \
+            && echo "posted." \
+            || echo "::warning::Slack post failed: $(jq -r '.error // "unknown"' <<<"$RESP")"
