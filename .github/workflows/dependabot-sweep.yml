@@ -52,9 +52,111 @@ jobs:
           fetch-depth: 1
 
       - name: Sweep
+        id: sweep
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           ORG: rarebit-one
           # schedule has no inputs → live; dispatch honours the dry-run toggle.
           DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+          NARRATION_FILE: ${{ runner.temp }}/sweep-narration.txt
         run: bash .github/scripts/dependabot-sweep.sh
+
+      # ----- Slack narration to #observability -----
+      #
+      # Deliberately NOT posted every pass. The sweep runs 4x/day and most passes
+      # are a no-op (ready=0 behind=0); narrating those trains everyone to ignore
+      # the channel, which defeats the point of flagging majors at all. So:
+      #
+      #   * ACTION pass  — something merged, rebased, or failed to merge. Post it.
+      #   * DIGEST pass  — the 00:xx UTC run, posted only when a human-gated or
+      #                    blocked backlog actually exists. This is what stops
+      #                    majors from piling up unseen on quiet days: without it,
+      #                    the backlog would only ever surface on a day something
+      #                    else happened to merge.
+      #   * otherwise    — stay silent.
+      #
+      # workflow_dispatch always posts, so the digest can be exercised on demand.
+      - name: Decide whether this pass is worth narrating
+        id: decide
+        env:
+          MERGED: ${{ steps.sweep.outputs.merged_count }}
+          REBASED: ${{ steps.sweep.outputs.rebased_count }}
+          FAILED: ${{ steps.sweep.outputs.failed_count }}
+          UNARMED: ${{ steps.sweep.outputs.unarmed_count }}
+          STUCK: ${{ steps.sweep.outputs.stuck_count }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          acted=$(( ${MERGED:-0} + ${REBASED:-0} + ${FAILED:-0} ))
+          backlog=$(( ${UNARMED:-0} + ${STUCK:-0} ))
+          # The 6-hourly cron drifts by minutes, so match the HOUR, not the minute.
+          hour=$(date -u +%H)
+          post=false
+          kind=action
+          if [ "$acted" -gt 0 ]; then
+            post=true
+          elif [ "$EVENT" = "workflow_dispatch" ] && [ "$backlog" -gt 0 ]; then
+            post=true; kind=digest
+          elif [ "$hour" -lt 6 ] && [ "$backlog" -gt 0 ]; then
+            post=true; kind=digest
+          fi
+          echo "post=$post" >> "$GITHUB_OUTPUT"
+          echo "kind=$kind" >> "$GITHUB_OUTPUT"
+          echo "decision: post=$post kind=$kind (acted=$acted backlog=$backlog hour=$hour)"
+
+      - name: Post Slack narration
+        if: ${{ always() && steps.decide.outputs.post == 'true' }}
+        env:
+          # Same bot-token path the weekly Actions audit uses. Requires the bot
+          # to be a member of the target channel.
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          CHANNEL: ${{ vars.SLACK_OBSERVABILITY_CHANNEL_ID }}
+          NARRATION_FILE: ${{ runner.temp }}/sweep-narration.txt
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          KIND: ${{ steps.decide.outputs.kind }}
+          MERGED: ${{ steps.sweep.outputs.merged_count }}
+          REBASED: ${{ steps.sweep.outputs.rebased_count }}
+          UNARMED: ${{ steps.sweep.outputs.unarmed_count }}
+          OLDEST: ${{ steps.sweep.outputs.oldest_unarmed_days }}
+          DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SLACK_BOT_TOKEN:-}" ] || [ -z "${CHANNEL:-}" ]; then
+            echo "::warning::SLACK_BOT_TOKEN or SLACK_OBSERVABILITY_CHANNEL_ID not set — skipping narration (the run log still has the detail)."
+            exit 0
+          fi
+          if [ ! -s "${NARRATION_FILE}" ]; then
+            echo "::warning::narration file missing or empty at ${NARRATION_FILE} — nothing to post."
+            exit 0
+          fi
+
+          if [ "$KIND" = "digest" ]; then
+            HEADER=':clipboard: *Dependabot — daily digest*'
+          else
+            HEADER=$(printf ':robot_face: *Dependabot sweep* — merged %s, rebased %s' "${MERGED:-0}" "${REBASED:-0}")
+          fi
+          [ "${DRY_RUN:-false}" = "true" ] && HEADER="$HEADER  _(dry-run — nothing changed)_"
+
+          # Escalate only when the human-gated backlog is genuinely ageing, so the
+          # nudge keeps its meaning instead of firing on every fresh major.
+          FOOTER=''
+          if [ "${UNARMED:-0}" -gt 0 ] && [ "${OLDEST:-0}" -ge 7 ]; then
+            FOOTER=$(printf '\n:hourglass: Oldest has been waiting *%s days* — worth a decision or a close.' "$OLDEST")
+          fi
+
+          TEXT=$(printf '%s\n\n%s\n%s<%s|run log>' "$HEADER" "$(cat "$NARRATION_FILE")" "$FOOTER" "$RUN_URL")
+
+          # chat.postMessage returns HTTP 200 even on logical errors (e.g.
+          # not_in_channel) — so don't rely on curl -f; parse `.ok`. Narration must
+          # never fail the sweep: a Slack outage is not a sweep failure.
+          RESP=$(curl -fsS -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H 'Content-type: application/json; charset=utf-8' \
+            -d "$(jq -n --arg c "$CHANNEL" --arg t "$TEXT" \
+                  '{channel:$c, text:$t, unfurl_links:false, unfurl_media:false}')") \
+            || { echo "::warning::Slack request failed (network/HTTP)."; exit 0; }
+          if [ "$(printf '%s' "$RESP" | jq -r '.ok')" = "true" ]; then
+            echo "Posted $KIND narration to $CHANNEL."
+          else
+            echo "::warning::Slack post failed: $(printf '%s' "$RESP" | jq -r '.error // "unknown"')"
+          fi
