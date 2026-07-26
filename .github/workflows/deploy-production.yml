@@ -199,6 +199,13 @@ jobs:
           SHA="${{ steps.main.outputs.sha }}"
           TAG="${{ steps.tag.outputs.tag }}"
 
+          # An annotated tag records an author, so the runner needs a git
+          # identity. Pushing a branch does not — which is why the promote
+          # step above succeeds without one and this step used to fail with
+          # "fatal: empty ident name".
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git tag -a "$TAG" "$SHA" -m "Production release $TAG"
           git push origin "$TAG"
           echo "Created and pushed tag $TAG"
