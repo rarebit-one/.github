@@ -24,6 +24,25 @@ on:
         required: false
         type: string
         default: "ci.yml"
+    outputs:
+      # The SHA this run actually promoted. Callers need it to track the
+      # resulting deployment, and MUST take it from here rather than re-reading
+      # main HEAD themselves: a merge landing between this job and theirs would
+      # otherwise have them wait on a commit that was never deployed, and any
+      # post-deploy verification gated on that wait would silently not run.
+      # See rarebit-one/jumpdrive-web#486 for the concrete failure.
+      sha:
+        description: "The commit SHA promoted to the production branch."
+        value: ${{ jobs.promote.outputs.sha }}
+      # Empty when `skipped` is true — there is no new tag on a no-op promotion.
+      tag:
+        description: "The release tag created for this promotion (empty if skipped)."
+        value: ${{ jobs.promote.outputs.tag }}
+      # Lets a caller distinguish "no tag because nothing to promote" from "no
+      # tag because something went wrong", which an empty `tag` alone cannot.
+      skipped:
+        description: "\"true\" when production was already at the target SHA and nothing was promoted."
+        value: ${{ jobs.promote.outputs.skipped }}
 
 # Never cancel an in-progress promotion
 concurrency:
@@ -36,6 +55,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: production
+
+    # Bubbled to the workflow-level `outputs:` above. `tag` is empty when the
+    # `check` step set skip=true, because the tag step is gated on that.
+    outputs:
+      sha: ${{ steps.main.outputs.sha }}
+      tag: ${{ steps.tag.outputs.tag }}
+      skipped: ${{ steps.check.outputs.skip }}
 
     env:
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
