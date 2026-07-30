@@ -8,6 +8,13 @@ name: Auto-lander (Dependabot + autonomous engine PRs)
 #
 #   1. Dependabot PRs — read the semver update-type via fetch-metadata, then
 #      enable auto-merge for patch + minor. Major bumps are left for a human.
+#      Exception: GROUPED github_actions updates land regardless of the
+#      aggregate update-type. fetch-metadata emits a single update-type across a
+#      group, and any member that isn't semver-resolvable — a same-version SHA
+#      re-pin, or a reusable-workflow pin with no version tag — forces that
+#      aggregate to semver-major. Because this org SHA-pins every action AND
+#      groups them, the strict gate skipped essentially every github_actions PR.
+#      These are vetted by the pin gate + CodeQL(Actions) + CI, so they land.
 #   2. Autonomous SRE engine PRs — branches prefixed issue-worker/, ci-fix/, or
 #      sentry-autofix/, opened by the SRE engine workflows. These are already
 #      vetted by the engine's own guardrails before opening, so they get
@@ -49,18 +56,44 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Approve and enable auto-merge for patch/minor
+        id: dependabot_enable
+        # Patch/minor always land. Additionally, a GROUPED github_actions update
+        # lands whatever its aggregate update-type says — see the header note:
+        # SHA-pinned group members make that aggregate meaningless (it reads
+        # semver-major even when every bump is a patch). Non-grouped updates and
+        # every other ecosystem keep the strict gate, so a bundler/npm major
+        # still waits for a human.
         if: >-
           github.actor == 'dependabot[bot]' && (
           steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
-          steps.metadata.outputs.update-type == 'version-update:semver-minor')
+          steps.metadata.outputs.update-type == 'version-update:semver-minor' || (
+          steps.metadata.outputs.package-ecosystem == 'github_actions' &&
+          steps.metadata.outputs.dependency-group != ''))
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
+          set -euo pipefail
           gh pr review --approve "$PR_URL" || true
-          gh pr merge --auto --squash "$PR_URL" || echo "::warning::auto-merge not enabled for $PR_URL"
+          gh pr merge --auto --squash "$PR_URL" || echo "::warning::gh pr merge --auto failed for $PR_URL"
+
+          # Read the enable back. `gh pr merge --auto` can report success while
+          # queueing nothing, which is exactly how this workflow sat green for
+          # days having landed nothing — fail loudly instead. MERGED counts as
+          # success: when every requirement is already green GitHub merges
+          # outright and leaves no pending autoMergeRequest, so a null there
+          # means "already landed", not "enable failed". `set -e` above makes a
+          # flaky `gh pr view` abort rather than read as queued.
+          verdict=$(gh pr view "$PR_URL" --json autoMergeRequest,state \
+            --jq 'if .state == "MERGED" or .autoMergeRequest != null then "ok" else "not-queued" end')
+          if [ "$verdict" != "ok" ]; then
+            echo "::error::auto-merge was NOT queued on $PR_URL (autoMergeRequest null and state is not MERGED)"
+            exit 1
+          fi
+          echo "auto-merge queued (or already merged) on $PR_URL" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Enable auto-merge — autonomous SRE engine PR
+        id: engine_enable
         # Actor-gated (not just `!= dependabot[bot]`) so a spoofed engine-prefix
         # branch from any other actor can't reach this step.
         if: github.actor == 'rarebit-one[bot]'
@@ -73,4 +106,52 @@ jobs:
           # test gate, signed commit) before opening — so just enable squash
           # auto-merge and let the repo's required-checks gate do the rest, the
           # same as Dependabot.
-          gh pr merge --auto --squash "$PR_URL" || echo "::warning::auto-merge not enabled for $PR_URL"
+          set -euo pipefail
+          gh pr merge --auto --squash "$PR_URL" || echo "::warning::gh pr merge --auto failed for $PR_URL"
+
+          # Same readback as the Dependabot path. Without it this step keeps the
+          # exact silent-success bug this workflow exists to close: a `|| echo`
+          # swallows the failure, the step's outcome is still `success` (not
+          # `skipped`), so the reporter below never flags it either.
+          verdict=$(gh pr view "$PR_URL" --json autoMergeRequest,state \
+            --jq 'if .state == "MERGED" or .autoMergeRequest != null then "ok" else "not-queued" end')
+          if [ "$verdict" != "ok" ]; then
+            echo "::error::auto-merge was NOT queued on $PR_URL (autoMergeRequest null and state is not MERGED)"
+            exit 1
+          fi
+          echo "auto-merge queued (or already merged) on $PR_URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report the decision (never conclude green having done nothing)
+        # The original failure mode was silence: when both enable steps were
+        # skipped, zero steps ran and the job still reported SUCCESS, so a PR
+        # that never got queued looked indistinguishable from one that did.
+        # Skipping can be legitimate (a bundler major SHOULD wait for a human),
+        # so this warns and records the reason rather than failing the job.
+        if: always()
+        env:
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          DEP_GROUP: ${{ steps.metadata.outputs.dependency-group }}
+          ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+          DEPENDABOT_OUTCOME: ${{ steps.dependabot_enable.outcome }}
+          ENGINE_OUTCOME: ${{ steps.engine_enable.outcome }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          {
+            echo "### Auto-lander decision"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| PR | $PR_URL |"
+            echo "| actor | ${{ github.actor }} |"
+            echo "| ecosystem | ${ECOSYSTEM:-—} |"
+            echo "| dependency-group | ${DEP_GROUP:-none (ungrouped)} |"
+            echo "| update-type | ${UPDATE_TYPE:-—} |"
+            echo "| dependabot step | ${DEPENDABOT_OUTCOME} |"
+            echo "| engine step | ${ENGINE_OUTCOME} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$DEPENDABOT_OUTCOME" = "skipped" ] && [ "$ENGINE_OUTCOME" = "skipped" ]; then
+            echo "::warning::auto-lander enabled nothing on $PR_URL — update-type=${UPDATE_TYPE:-none} group=${DEP_GROUP:-none} ecosystem=${ECOSYSTEM:-none}. If this bump should land automatically, the gate needs widening; if it is a major, it is correctly waiting for a human."
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "⚠️ **Nothing was enabled** — this PR will not land on its own." >> "$GITHUB_STEP_SUMMARY"
+          fi
