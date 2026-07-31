@@ -68,6 +68,40 @@ config `.pinact.yaml`). Three pieces keep that compliant over time:
   `github-actions` block in its *own* `.github/dependabot.yml` — the sweep pins,
   Dependabot freshens; they're complementary.
 
+## Auto-lander merge token (`AUTOLAND_PAT`)
+
+`dependabot-auto-merge.yml` (the org auto-lander) enables native squash
+auto-merge on Dependabot PRs, autonomous SRE-engine PRs, and the maintainer's
+own PRs. **Which token performs the enable decides whether the resulting merge
+emits a `push` event.**
+
+GitHub does not emit workflow-triggering events for actions taken with the
+automatic `GITHUB_TOKEN`. Native auto-merge is attributed to whoever enabled
+it, so an enable done with `GITHUB_TOKEN` merges as `github-actions[bot]` and
+fires **no `push` event** — which silently skips `deploy.yml` (chained off
+`workflow_run` of main CI) and `sentry-release.yml` (`push: main`) in every app
+repo. Verified on nutripod-web: auto-landed `c99c3084` has zero `push` /
+`workflow_run` runs; the human-merged commits either side of it have both.
+
+So the workflow enables auto-merge with **`secrets.AUTOLAND_PAT`** when it is
+available (reads and the Dependabot approval still use `GITHUB_TOKEN`), and
+falls back to `GITHUB_TOKEN` when it is not — emitting a `::warning::` and a
+job-summary block stating that downstream `push`-triggered workflows will not
+fire. The fallback is never silent.
+
+**Setup (one-time, maintainer):** create an **org-level** Actions secret
+`AUTOLAND_PAT` on `rarebit-one` with visibility **All repositories**.
+
+| | |
+|---|---|
+| Classic PAT | `repo` scope only |
+| Fine-grained PAT | Contents: *Read and write* · Pull requests: *Read and write*, on all `rarebit-one` repos |
+
+Do **not** grant `workflow` scope — this token never pushes workflow files.
+`rarebit-static-v3` already holds a repo-level `AUTOLAND_PAT` for its own
+sweeper; a repo secret wins over an org secret of the same name, which is
+harmless as long as both name the same identity.
+
 ### The `anthropics/claude-code-action` exemption (org convention)
 
 We pin `anthropics/claude-code-action` to a **main-branch commit** (ahead of the
