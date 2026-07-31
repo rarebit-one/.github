@@ -1,9 +1,11 @@
 name: Pin Sweep
 
 # Scheduled self-healer for the actions-pinning estate. Weekly (+ on demand) it
-# iterates every non-archived rarebit-one repo, runs `pinact run` honoring each
-# repo's own `.pinact.yaml` (seeding one where it's missing), and — if that
-# produces a diff — opens an auto-mergeable PR on that repo with the fix.
+# iterates every non-archived rarebit-one repo that actually has something to
+# pin (workflows, composite actions, or a root action manifest), runs
+# `pinact run` honoring each repo's own `.pinact.yaml` (seeding one where it's
+# missing), and — if that produces a diff — opens an auto-mergeable PR on that
+# repo with the fix.
 #
 # This is the ACTUATOR that keeps the estate pinned as new actions land and tags
 # drift; the `pin-check.yml` PR gate is the SENSOR that blocks drift on the way
@@ -71,6 +73,7 @@ jobs:
           GH_TOKEN: ${{ steps.tok.outputs.token }}
           ONLY_REPO: ${{ inputs.only_repo }}
           DRY_RUN: ${{ inputs.dry_run }}
+          OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
           # Non-archived repos the release-bot App is installed on.
@@ -82,6 +85,48 @@ jobs:
               echo "::warning::only_repo='${ONLY_REPO}' matched no installed non-archived repo."
             fi
           fi
+
+          # Drop repos that have nothing for pinact to act on: no
+          # `.github/workflows/`, no `.github/actions/` and no root-level
+          # `action.yml`/`action.yaml` (the manifest of a repo that *is* a
+          # published action). Those are the paths pinact scans; a repo with none
+          # of them cannot contain a `uses:` to pin. Sweeping such a repo is not
+          # a no-op — the "seed .pinact.yaml if missing" step alone counts as a
+          # diff, so the sweep opens a PR adding a config file governing zero
+          # workflows. That is what produced `workspace-config#1`: a config-mirror
+          # repo with zero workflows, and (having no checks and auto-merge
+          # disabled) no way for the PR to ever auto-land — it sat open until
+          # closed by hand. Filtering here rather than mid-sweep also saves the
+          # pointless matrix legs.
+          #
+          # Only a definite 404 means "no such tree". Any other failure (403,
+          # 5xx, network) is FAILED OPEN — the repo stays in the sweep and the
+          # run warns — because silently skipping on a transient error would drop
+          # a repo with real unpinned actions from the pass without the `alert`
+          # job ever firing.
+          : > keep.txt
+          : > skip.txt
+          for NAME in $(printf '%s\n' "$NAMES" | sed '/^$/d'); do
+            VERDICT=skip
+            for DIR in .github/workflows .github/actions action.yml action.yaml; do
+              if ERR="$(gh api "repos/${OWNER}/${NAME}/contents/${DIR}" --silent 2>&1)"; then
+                VERDICT=keep
+                break
+              elif ! printf '%s' "$ERR" | grep -q 'HTTP 404'; then
+                echo "::warning::${NAME}: could not read ${DIR} ($(printf '%s' "$ERR" | tr '\n' ' ')) — keeping it in the sweep rather than silently dropping a repo that may carry unpinned actions."
+                VERDICT=keep
+                break
+              fi
+            done
+            if [ "$VERDICT" = keep ]; then
+              echo "$NAME" >> keep.txt
+            else
+              echo "::notice::${NAME}: no .github/workflows, .github/actions or root action.yml — nothing to pin, skipping."
+              echo "$NAME" >> skip.txt
+            fi
+          done
+          NAMES="$(cat keep.txt)"
+
           MATRIX="$(printf '%s\n' "$NAMES" | sed '/^$/d' \
             | python3 -c 'import json,sys; print(json.dumps([{"repo": r.strip()} for r in sys.stdin if r.strip()]))')"
           COUNT="$(printf '%s' "$MATRIX" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
@@ -92,6 +137,11 @@ jobs:
             echo ""
             echo "- **Target repos:** ${COUNT}$([ "${DRY_RUN}" = "true" ] && echo ' (dry-run — no fixes)')"
             printf '%s\n' "$NAMES" | sed '/^$/d' | sed 's/^/- /'
+            if [ -s skip.txt ]; then
+              echo ""
+              echo "- **Skipped (no \`.github/workflows\`, \`.github/actions\` or root \`action.yml\` — nothing to pin):** $(wc -l < skip.txt | tr -d ' ')"
+              sed 's/^/- /' skip.txt
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
   sweep:
@@ -238,9 +288,24 @@ jobs:
           UPDATED="$(gh api "repos/${TARGET_REPO}/git/refs/heads/${BRANCH}" --jq '.object.sha')"
           [ "$UPDATED" != "$SIGNED" ] && { echo "ERROR: ref did not advance to signed SHA" >&2; exit 1; }
 
+          # Don't promise auto-merge a repo can't deliver. Where auto-merge is
+          # disabled the PR still has value (a human can merge a real pin fix),
+          # but it must say so — and warn — rather than sit open claiming it will
+          # land itself.
+          # `autoMergeAllowed` alone is not enough: the merge below is
+          # `--squash`, so a repo with auto-merge on but squash merges disabled
+          # would still leave the PR sitting. Require both.
+          MERGE_CAPS="$(gh repo view "$TARGET_REPO" --json autoMergeAllowed,squashMergeAllowed --jq '"\(.autoMergeAllowed) \(.squashMergeAllowed)"')"
+          if [ "$MERGE_CAPS" = "true true" ]; then
+            MERGE_NOTE="This PR has squash auto-merge enabled and lands once CI is green."
+          else
+            MERGE_NOTE="⚠️ This repo does not allow squash auto-merge (autoMergeAllowed/squashMergeAllowed: ${MERGE_CAPS}), so this PR needs a manual merge."
+            echo "::warning::${TARGET_REPO} cannot squash auto-merge (autoMergeAllowed/squashMergeAllowed: ${MERGE_CAPS}) — the pin-fix PR will need a manual merge."
+          fi
+
           PR_BODY="## Auto-fix from the org pin-sweep
 
-          \`pinact run\` found third-party GitHub Actions that weren't SHA-pinned in this repo and re-pinned them (honoring this repo's \`.pinact.yaml\`). This PR has squash auto-merge enabled and lands once CI is green.
+          \`pinact run\` found third-party GitHub Actions that weren't SHA-pinned in this repo and re-pinned them (honoring this repo's \`.pinact.yaml\`). ${MERGE_NOTE}
 
           - **Sweep run:** ${RUN_URL}
           - **Why:** unpinned actions are a supply-chain risk (a mutable tag can be re-pointed to malicious code). The \`pin-check\` gate blocks new drift; this sweep heals anything already merged.
