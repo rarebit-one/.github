@@ -1,0 +1,8 @@
+# Worktrees (workspace worktree-only workflow). Both conventions are in use
+# across this estate — .worktrees/ for developer trees, .claude/worktrees/ for
+# agent trees — so ignore both, or whichever is missing reports the tree dirty.
+.worktrees/
+.claude/worktrees/
+
+# macOS
+.DS_Store
