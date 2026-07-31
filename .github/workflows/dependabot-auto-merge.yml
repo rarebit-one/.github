@@ -28,6 +28,46 @@ name: Auto-lander (Dependabot + autonomous engine + maintainer PRs)
 # workflow checks out no PR code and runs no PR bundle — it only reads metadata
 # and calls the gh API. The only privileged action is "approve + enable
 # auto-merge", which still defers the actual merge to the required-checks gate.
+#
+# ---------------------------------------------------------------------------
+# WHY THE MERGE NEEDS A PAT (AUTOLAND_PAT)
+# ---------------------------------------------------------------------------
+# GitHub deliberately does NOT emit workflow-triggering events for actions
+# performed with the automatic `GITHUB_TOKEN` — the documented loop-prevention
+# rule. Native auto-merge is attributed to whoever ENABLED it, so an enable done
+# with `GITHUB_TOKEN` produces a merge commit authored by `github-actions[bot]`
+# that fires NO `push` event and therefore no `workflow_run` chain off it.
+#
+# Verified empirically on nutripod-web: the auto-landed Dependabot merge
+# c99c3084 (main, 2026-07-27) has FOUR workflow runs, none of them `push` or
+# `workflow_run`; the human-merged commits either side of it (dc76fc33,
+# 34824fb2) both have `push` AND `workflow_run` runs. Same repo, same branch,
+# same workflows — the only difference is who performed the merge.
+#
+# That silently skips every downstream chain in this org: `deploy.yml`
+# (`workflow_run` off main CI) and `sentry-release.yml` (`push: main`) across
+# the five app/static repos. It was already true for Dependabot; PR #78, which
+# extended this lander to the maintainer's own PRs, made it materially worse
+# because those are the PRs carrying app code that actually needs deploying.
+#
+# Fix: enable auto-merge with `secrets.AUTOLAND_PAT` (a real user token) when
+# it is available, exactly as rarebit-static-v3's own auto-land sweeper already
+# does. READS still use `GITHUB_TOKEN` — the PAT is used ONLY for the enable.
+#
+# Graceful degradation: not every repo will have the secret. When it is absent
+# the workflow falls back to `GITHUB_TOKEN` and says so LOUDLY (a `::warning::`
+# plus a job-summary line), because a silent fallback would recreate exactly
+# the class of bug this comment exists to describe.
+#
+# SETUP: `AUTOLAND_PAT` should be an ORG-level Actions secret on `rarebit-one`
+# with visibility "All repositories" — the lander is org-wide, and per-repo
+# copies would drift. Minimum scopes for a classic PAT: `repo` (needs
+# `contents:write` + `pull_requests:write` to merge). A fine-grained PAT needs
+# Contents: Read and write + Pull requests: Read and write on the org's repos.
+# Do NOT grant `workflow` scope: this token never pushes workflow files.
+# rarebit-static-v3 already holds a repo-level `AUTOLAND_PAT`; an org secret
+# does not override a repo secret of the same name, so that one keeps winning
+# there, which is fine — both point at the same identity.
 
 on:
   workflow_call:
@@ -86,6 +126,39 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      - name: Resolve the merge token (PAT preferred, GITHUB_TOKEN fallback)
+        id: token
+        # Runs unconditionally so the decision is recorded on every path,
+        # including the ones that end up enabling nothing. `secrets` is only
+        # readable from step-level `env:`/`with:` (never a job `if:`), and the
+        # comparison yields a plain "true"/"false" — the secret itself is never
+        # interpolated here, so nothing lands in the log.
+        env:
+          HAS_PAT: ${{ secrets.AUTOLAND_PAT != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$HAS_PAT" = "true" ]; then
+            echo "mode=AUTOLAND_PAT" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Auto-lander merge token"
+              echo ""
+              echo "✅ Using \`AUTOLAND_PAT\` — the merge will be attributed to a real user, so downstream \`push\` / \`workflow_run\` workflows (deploy, sentry-release) WILL fire."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "mode=GITHUB_TOKEN (degraded)" >> "$GITHUB_OUTPUT"
+            echo "::warning::AUTOLAND_PAT is not available to this repo — falling back to GITHUB_TOKEN. GitHub does not emit workflow-triggering events for GITHUB_TOKEN actions, so the resulting merge will fire NO push event: deploy.yml (workflow_run) and sentry-release.yml (push: main) will NOT run for this merge. Set the org secret AUTOLAND_PAT (visibility: all repositories) to restore them."
+            {
+              echo "### Auto-lander merge token"
+              echo ""
+              echo "⚠️ **Degraded — \`AUTOLAND_PAT\` not available; falling back to \`GITHUB_TOKEN\`.**"
+              echo ""
+              echo "The merge will be attributed to \`github-actions[bot]\` and will emit **no \`push\` event**."
+              echo "Downstream \`push\`-triggered and \`workflow_run\`-chained workflows (e.g. \`deploy.yml\`, \`sentry-release.yml\`) **will not fire** for this merge."
+              echo ""
+              echo "Fix: set an org-level \`AUTOLAND_PAT\` Actions secret on \`rarebit-one\` with visibility *All repositories*."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Fetch Dependabot metadata
         id: metadata
         if: github.actor == 'dependabot[bot]'
@@ -108,12 +181,19 @@ jobs:
           steps.metadata.outputs.package-ecosystem == 'github_actions' &&
           steps.metadata.outputs.dependency-group != ''))
         env:
+          # Reads + the approval keep the ambient token. The approval is
+          # deliberately NOT moved to the PAT: it would turn every Dependabot
+          # bump into an approval signed by the maintainer personally, which is
+          # a governance change, not a push-event fix.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The ENABLE — and only the enable — uses the PAT when present, so the
+          # eventual merge is attributed to a real user and emits a push event.
+          MERGE_TOKEN: ${{ secrets.AUTOLAND_PAT || secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
           set -euo pipefail
           gh pr review --approve "$PR_URL" || true
-          gh pr merge --auto --squash "$PR_URL" || echo "::warning::gh pr merge --auto failed for $PR_URL"
+          GH_TOKEN="$MERGE_TOKEN" gh pr merge --auto --squash "$PR_URL" || echo "::warning::gh pr merge --auto failed for $PR_URL"
 
           # Read the enable back. `gh pr merge --auto` can report success while
           # queueing nothing, which is exactly how this workflow sat green for
@@ -137,6 +217,7 @@ jobs:
         if: github.actor == 'rarebit-one[bot]'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MERGE_TOKEN: ${{ secrets.AUTOLAND_PAT || secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
           # Engine PRs (issue-worker/*, ci-fix/*, sentry-autofix/*) are already
@@ -145,7 +226,7 @@ jobs:
           # auto-merge and let the repo's required-checks gate do the rest, the
           # same as Dependabot.
           set -euo pipefail
-          gh pr merge --auto --squash "$PR_URL" || echo "::warning::gh pr merge --auto failed for $PR_URL"
+          GH_TOKEN="$MERGE_TOKEN" gh pr merge --auto --squash "$PR_URL" || echo "::warning::gh pr merge --auto failed for $PR_URL"
 
           # Same readback as the Dependabot path. Without it this step keeps the
           # exact silent-success bug this workflow exists to close: a `|| echo`
@@ -166,13 +247,14 @@ jobs:
         if: github.actor == 'jaryl'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MERGE_TOKEN: ${{ secrets.AUTOLAND_PAT || secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
           # NOTE: no `gh pr review --approve` here, unlike the Dependabot path.
           # GitHub rejects approving your own PR, and a self-approval would be
           # worthless as a signal even if it were allowed. Auto-merge only.
           set -euo pipefail
-          gh pr merge --auto --squash "$PR_URL" || echo "::warning::gh pr merge --auto failed for $PR_URL"
+          GH_TOKEN="$MERGE_TOKEN" gh pr merge --auto --squash "$PR_URL" || echo "::warning::gh pr merge --auto failed for $PR_URL"
 
           # Same readback as the other two paths — `gh pr merge --auto` can
           # report success while queueing nothing.
@@ -198,6 +280,7 @@ jobs:
           DEPENDABOT_OUTCOME: ${{ steps.dependabot_enable.outcome }}
           ENGINE_OUTCOME: ${{ steps.engine_enable.outcome }}
           MAINTAINER_OUTCOME: ${{ steps.maintainer_enable.outcome }}
+          MERGE_TOKEN_MODE: ${{ steps.token.outputs.mode }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
           {
@@ -213,6 +296,7 @@ jobs:
             echo "| dependabot step | ${DEPENDABOT_OUTCOME} |"
             echo "| engine step | ${ENGINE_OUTCOME} |"
             echo "| maintainer step | ${MAINTAINER_OUTCOME} |"
+            echo "| merge token | ${MERGE_TOKEN_MODE:-unknown} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [ "$DEPENDABOT_OUTCOME" = "skipped" ] && [ "$ENGINE_OUTCOME" = "skipped" ] && [ "$MAINTAINER_OUTCOME" = "skipped" ]; then
