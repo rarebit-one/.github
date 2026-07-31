@@ -1,9 +1,9 @@
-name: Auto-lander (Dependabot + autonomous engine PRs)
+name: Auto-lander (Dependabot + autonomous engine + maintainer PRs)
 
 # Org-shared reusable auto-lander. A thin per-repo caller
 # (dependabot-auto-merge.yml, `on: pull_request_target`) invokes this so the
 # logic lives in one place — mirrors the claude-code-review reusable+caller
-# pattern. It lands two classes of PR by enabling squash auto-merge (GitHub
+# pattern. It lands three classes of PR by enabling squash auto-merge (GitHub
 # merges once the repo's required checks go green):
 #
 #   1. Dependabot PRs — read the semver update-type via fetch-metadata, then
@@ -19,6 +19,10 @@ name: Auto-lander (Dependabot + autonomous engine PRs)
 #      sentry-autofix/, opened by the SRE engine workflows. These are already
 #      vetted by the engine's own guardrails before opening, so they get
 #      auto-merge enabled directly (no semver gate).
+#   3. Maintainer PRs — opened AND triggered by `jaryl`, not a draft. Auto-merge
+#      only; no auto-approve, since a self-approval is meaningless (and the API
+#      rejects it). See the job-level note for why the actor gate is the whole
+#      gate here, and for the sharp edge on repos with no required checks.
 #
 # Safety: the caller fires on pull_request_target (writable token), but this
 # workflow checks out no PR code and runs no PR bundle — it only reads metadata
@@ -36,12 +40,46 @@ jobs:
     # to push a `ci-fix/*` (etc.) branch would get native auto-merge enabled on
     # their PR (landing on required-checks-green with no human review). Only the
     # release-bot App opens genuine engine PRs, so require its login too.
+    #
+    # The maintainer path deliberately carries NO branch-prefix gate. The prefix
+    # exists on the engine path only because `rarebit-one[bot]` is a shared
+    # identity that opens plenty of PRs which are not engine output, so the
+    # prefix narrows the App down to the vetted subset. A human login is not a
+    # shared identity: `github.actor` is stamped by GitHub from the
+    # authenticated actor, is not settable from the PR, and cannot be reached by
+    # a fork or by anyone able to push a branch. So actor == 'jaryl' already
+    # means "the maintainer did this", and a branch convention on top would be
+    # decoration, not security.
+    #
+    # Two conditions ARE added on top of the actor:
+    #   * `pull_request.user.login == 'jaryl'` — on a `synchronize` event the
+    #     actor is whoever pushed, so a maintainer push to somebody else's PR
+    #     branch would otherwise enable auto-merge on a PR he did not author.
+    #     Requiring author AND actor keeps the endorsement explicit.
+    #   * `draft == false` — a draft is an explicit "not ready"; auto-merge on
+    #     one would land it the moment it is marked ready and checks are green.
+    #     Callers opting into this path should add `ready_for_review` to their
+    #     `pull_request_target` `types:` — the default set is opened/
+    #     synchronize/reopened, so a draft marked ready with no further push
+    #     would never re-trigger and would sit unarmed until the next commit.
+    #
+    # SHARP EDGE — read before enabling this on a new repo: auto-merge is only
+    # as strong as the repo's REQUIRED checks. Most repos in this org are not
+    # branch-protected (workspace CLAUDE.md Rule #7: "the checks that actually
+    # ran are the gate" — that convention is about a human judging a PR, and
+    # native auto-merge does not implement it). On a repo with zero required
+    # checks there is nothing left to wait for, so "auto-merge" means merge on
+    # open. Callers that opt into the maintainer path should have branch
+    # protection with at least the CI check required.
     if: >-
       github.actor == 'dependabot[bot]' ||
       (github.actor == 'rarebit-one[bot]' && (
         startsWith(github.event.pull_request.head.ref, 'issue-worker/') ||
         startsWith(github.event.pull_request.head.ref, 'ci-fix/') ||
-        startsWith(github.event.pull_request.head.ref, 'sentry-autofix/')))
+        startsWith(github.event.pull_request.head.ref, 'sentry-autofix/'))) ||
+      (github.actor == 'jaryl' &&
+        github.event.pull_request.user.login == 'jaryl' &&
+        github.event.pull_request.draft == false)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -121,6 +159,31 @@ jobs:
           fi
           echo "auto-merge queued (or already merged) on $PR_URL" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Enable auto-merge — maintainer PR
+        id: maintainer_enable
+        # The job-level `if` already required actor == author == 'jaryl' and
+        # not-a-draft; this narrows the step to that path.
+        if: github.actor == 'jaryl'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          # NOTE: no `gh pr review --approve` here, unlike the Dependabot path.
+          # GitHub rejects approving your own PR, and a self-approval would be
+          # worthless as a signal even if it were allowed. Auto-merge only.
+          set -euo pipefail
+          gh pr merge --auto --squash "$PR_URL" || echo "::warning::gh pr merge --auto failed for $PR_URL"
+
+          # Same readback as the other two paths — `gh pr merge --auto` can
+          # report success while queueing nothing.
+          verdict=$(gh pr view "$PR_URL" --json autoMergeRequest,state \
+            --jq 'if .state == "MERGED" or .autoMergeRequest != null then "ok" else "not-queued" end')
+          if [ "$verdict" != "ok" ]; then
+            echo "::error::auto-merge was NOT queued on $PR_URL (autoMergeRequest null and state is not MERGED)"
+            exit 1
+          fi
+          echo "auto-merge queued (or already merged) on $PR_URL" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Report the decision (never conclude green having done nothing)
         # The original failure mode was silence: when both enable steps were
         # skipped, zero steps ran and the job still reported SUCCESS, so a PR
@@ -134,6 +197,7 @@ jobs:
           ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
           DEPENDABOT_OUTCOME: ${{ steps.dependabot_enable.outcome }}
           ENGINE_OUTCOME: ${{ steps.engine_enable.outcome }}
+          MAINTAINER_OUTCOME: ${{ steps.maintainer_enable.outcome }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
           {
@@ -148,9 +212,10 @@ jobs:
             echo "| update-type | ${UPDATE_TYPE:-—} |"
             echo "| dependabot step | ${DEPENDABOT_OUTCOME} |"
             echo "| engine step | ${ENGINE_OUTCOME} |"
+            echo "| maintainer step | ${MAINTAINER_OUTCOME} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          if [ "$DEPENDABOT_OUTCOME" = "skipped" ] && [ "$ENGINE_OUTCOME" = "skipped" ]; then
+          if [ "$DEPENDABOT_OUTCOME" = "skipped" ] && [ "$ENGINE_OUTCOME" = "skipped" ] && [ "$MAINTAINER_OUTCOME" = "skipped" ]; then
             echo "::warning::auto-lander enabled nothing on $PR_URL — update-type=${UPDATE_TYPE:-none} group=${DEP_GROUP:-none} ecosystem=${ECOSYSTEM:-none}. If this bump should land automatically, the gate needs widening; if it is a major, it is correctly waiting for a human."
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "⚠️ **Nothing was enabled** — this PR will not land on its own." >> "$GITHUB_STEP_SUMMARY"
