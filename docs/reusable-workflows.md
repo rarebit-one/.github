@@ -68,7 +68,7 @@ config `.pinact.yaml`). Three pieces keep that compliant over time:
   `github-actions` block in its *own* `.github/dependabot.yml` — the sweep pins,
   Dependabot freshens; they're complementary.
 
-## Auto-lander merge token (`AUTOLAND_PAT`)
+## Auto-lander merge token (App → `AUTOLAND_PAT` → `GITHUB_TOKEN`)
 
 `dependabot-auto-merge.yml` (the org auto-lander) enables native squash
 auto-merge on Dependabot PRs, autonomous SRE-engine PRs, and the maintainer's
@@ -83,24 +83,52 @@ fires **no `push` event** — which silently skips `deploy.yml` (chained off
 repo. Verified on nutripod-web: auto-landed `c99c3084` has zero `push` /
 `workflow_run` runs; the human-merged commits either side of it have both.
 
-So the workflow enables auto-merge with **`secrets.AUTOLAND_PAT`** when it is
-available (reads and the Dependabot approval still use `GITHUB_TOKEN`), and
-falls back to `GITHUB_TOKEN` when it is not — emitting a `::warning::` and a
-job-summary block stating that downstream `push`-triggered workflows will not
-fire. The fallback is never silent.
+### Why an App token, not a PAT
 
-**Setup (one-time, maintainer):** create an **org-level** Actions secret
-`AUTOLAND_PAT` on `rarebit-one` with visibility **All repositories**.
+#79 shipped this fix as `AUTOLAND_PAT` — and it never took effect, because the
+secret was never created. All 20 consumer repos fell through to `GITHUB_TOKEN`
+for the whole window, announcing it into job logs nobody read. jumpdrive-web#566
+has the forensics: 17 consecutive `main` commits with **zero** `push` runs,
+which also broke that repo's release gate (the promote reusable looks for a CI
+run on the promoted SHA and found none, so `/release` needed a manual `Test`
+dispatch first).
+
+The lesson is not "remember to mint the PAT" — it is that a fix gated on a human
+creating a credential out-of-band is a fix that reliably does not ship.
+
+A **GitHub App installation access token** clears the loop-prevention rule
+exactly as a PAT does, and this org already has the App installed everywhere:
 
 | | |
 |---|---|
-| Classic PAT | `repo` scope only |
-| Fine-grained PAT | Contents: *Read and write* · Pull requests: *Read and write*, on all `rarebit-one` repos |
+| App | `rarebit-one`, id `3896724`, installed on **all** repositories |
+| Permissions | `contents: write` · `pull_requests: write` |
+| Client id | `RELEASE_BOT_CLIENT_ID` — org **variable**, visibility *All repositories* |
+| Private key | `RELEASE_BOT_PRIVATE_KEY` — org **secret**, visibility *All repositories* |
 
-Do **not** grant `workflow` scope — this token never pushes workflow files.
-`rarebit-static-v3` already holds a repo-level `AUTOLAND_PAT` for its own
-sweeper; a repo secret wins over an org secret of the same name, which is
-harmless as long as both name the same identity.
+No new credential, no expiry to forget, not attributed to a person, revocable
+independently of anyone's account.
+
+### Precedence
+
+1. **release-bot App token** — minted per-run via `actions/create-github-app-token`,
+   scoped down to `contents: write` + `pull-requests: write`. The normal path.
+2. **`AUTOLAND_PAT`** — retained as a middle rung because `rarebit-static-v3`
+   holds a repo-level one, and a repo secret is not overridden by an org secret
+   of the same name. Also covers any repo where the App is uninstalled.
+3. **`GITHUB_TOKEN`** — degraded. Emits a `::warning::` plus a job-summary block
+   naming the workflows that will not fire, and a troubleshooting checklist. The
+   fallback is never silent.
+
+Reads and the Dependabot approval always keep `GITHUB_TOKEN`; only the
+`gh pr merge --auto` enable uses the elevated token. Moving the approval would
+be a governance change, not a push-event fix.
+
+The decision summary at the end of every run carries a **merge token** row, so
+which rung was used is visible on each PR without reading the log.
+
+**Callers must pass `secrets: inherit`** — without it `RELEASE_BOT_PRIVATE_KEY`
+never reaches the reusable and the App rung drops silently to the next one.
 
 ### The `anthropics/claude-code-action` exemption (org convention)
 
