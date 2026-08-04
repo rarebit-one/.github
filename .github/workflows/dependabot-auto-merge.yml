@@ -165,7 +165,21 @@ jobs:
         continue-on-error: true
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
+          # `client-id:`, not `app-id:` — RELEASE_BOT_CLIENT_ID holds the App's
+          # Client ID (Iv23li…), not its numeric App ID (3896724), and this is
+          # what every other call site of this action in this repo uses
+          # (gem-release-tag, gem-release-prep, dependabot-sweep, pin-sweep,
+          # weekly-actions-audit).
+          #
+          # Not a latent bug either way: v3.2.0's `app-id` input also accepts a
+          # Client ID, and jumpdrive-web's sync-rbis job proves it empirically —
+          # same action SHA, same variable, passed as `app-id:`, mints fine. So
+          # this is naming hygiene, not a fix. Worth being deliberate about
+          # regardless: the mint is `continue-on-error`, so ANY future failure
+          # here drops silently to the GITHUB_TOKEN rung and the lander goes
+          # back to landing merges that fire no push event. The job summary's
+          # token row is what makes that visible — read it, don't assume.
+          client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
           # Scoped to exactly what `gh pr merge --auto` needs. The App holds
           # more (issues, workflows); an installation token is capped down to
