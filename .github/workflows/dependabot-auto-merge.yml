@@ -30,7 +30,7 @@ name: Auto-lander (Dependabot + autonomous engine + maintainer PRs)
 # auto-merge", which still defers the actual merge to the required-checks gate.
 #
 # ---------------------------------------------------------------------------
-# WHY THE MERGE NEEDS A PAT (AUTOLAND_PAT)
+# WHY THE MERGE NEEDS A NON-AMBIENT TOKEN
 # ---------------------------------------------------------------------------
 # GitHub deliberately does NOT emit workflow-triggering events for actions
 # performed with the automatic `GITHUB_TOKEN` — the documented loop-prevention
@@ -50,24 +50,51 @@ name: Auto-lander (Dependabot + autonomous engine + maintainer PRs)
 # extended this lander to the maintainer's own PRs, made it materially worse
 # because those are the PRs carrying app code that actually needs deploying.
 #
-# Fix: enable auto-merge with `secrets.AUTOLAND_PAT` (a real user token) when
-# it is available, exactly as rarebit-static-v3's own auto-land sweeper already
-# does. READS still use `GITHUB_TOKEN` — the PAT is used ONLY for the enable.
+# ---------------------------------------------------------------------------
+# WHY AN APP TOKEN AND NOT A PAT
+# ---------------------------------------------------------------------------
+# #79 shipped the fix as `secrets.AUTOLAND_PAT` — and it never worked, because
+# the secret was never created. The lander fell through to `GITHUB_TOKEN` in all
+# 20 consumer repos for the entire window, announcing it into job logs nobody
+# reads. jumpdrive-web#566 has the forensics: 17 consecutive main commits there
+# with zero `push` runs, which also broke the release gate (the promote reusable
+# looks for a CI run on the promoted SHA and found none).
 #
-# Graceful degradation: not every repo will have the secret. When it is absent
-# the workflow falls back to `GITHUB_TOKEN` and says so LOUDLY (a `::warning::`
-# plus a job-summary line), because a silent fallback would recreate exactly
-# the class of bug this comment exists to describe.
+# The lesson is not "remember to mint the PAT". It is that a fix gated on a
+# human creating a credential out-of-band is a fix that reliably does not ship.
 #
-# SETUP: `AUTOLAND_PAT` should be an ORG-level Actions secret on `rarebit-one`
-# with visibility "All repositories" — the lander is org-wide, and per-repo
-# copies would drift. Minimum scopes for a classic PAT: `repo` (needs
-# `contents:write` + `pull_requests:write` to merge). A fine-grained PAT needs
-# Contents: Read and write + Pull requests: Read and write on the org's repos.
-# Do NOT grant `workflow` scope: this token never pushes workflow files.
-# rarebit-static-v3 already holds a repo-level `AUTOLAND_PAT`; an org secret
-# does not override a repo secret of the same name, so that one keeps winning
-# there, which is fine — both point at the same identity.
+# A GitHub App installation access token clears the loop-prevention rule exactly
+# as a PAT does — it is GitHub's other documented answer for "trigger a workflow
+# from a workflow" — and this org already has the App:
+#
+#   * App `rarebit-one` (id 3896724), installed on ALL repositories, holding
+#     `contents: write` + `pull_requests: write` — precisely the enable's needs
+#   * `RELEASE_BOT_CLIENT_ID`   — org VARIABLE, visibility "All repositories"
+#   * `RELEASE_BOT_PRIVATE_KEY` — org SECRET,   visibility "All repositories"
+#
+# So the App path needs no new credential, has no expiry to forget, is not
+# attributed to a person, and is revocable independently of anyone's account.
+# It is strictly better than the PAT on every axis that made the PAT fragile.
+#
+# READS and the Dependabot approval still use `GITHUB_TOKEN` — the elevated
+# token is used ONLY for the `gh pr merge --auto` enable.
+#
+# ---------------------------------------------------------------------------
+# TOKEN PRECEDENCE — App → AUTOLAND_PAT → GITHUB_TOKEN
+# ---------------------------------------------------------------------------
+# `AUTOLAND_PAT` is retained as the middle rung, not deleted: rarebit-static-v3
+# holds a repo-level one, and a repo secret is not overridden by an org secret
+# of the same name. Keeping the rung means that repo (and any future one where
+# the App is uninstalled) still lands merges that fire push events.
+#
+# The final fallback to `GITHUB_TOKEN` degrades LOUDLY — a `::warning::` plus a
+# job-summary block naming the workflows that will not fire — because a silent
+# fallback is the exact bug this comment exists to describe, and is how the #79
+# fix stayed inert for so long. The token-mode row in the decision summary at
+# the bottom of this job records which rung was used on EVERY run.
+#
+# Callers must pass `secrets: inherit`, or `RELEASE_BOT_PRIVATE_KEY` is not
+# reachable here and the App rung silently drops to the next one.
 
 on:
   workflow_call:
@@ -126,36 +153,69 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - name: Resolve the merge token (PAT preferred, GITHUB_TOKEN fallback)
+      - name: Mint a release-bot App token for the merge
+        id: app_token
+        # `continue-on-error` is load-bearing, not defensive dressing: this
+        # action FAILS the step when the client-id or private key is missing or
+        # the App is not installed on the calling repo. Without it, one repo
+        # outside the App's installation would take the whole lander down for
+        # that PR — turning a graceful drop to the next token rung into an
+        # outage. On failure `steps.app_token.outputs.token` is empty, which is
+        # exactly what the precedence chain below reads.
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          # Scoped to exactly what `gh pr merge --auto` needs. The App holds
+          # more (issues, workflows); an installation token is capped down to
+          # what is requested here, so the enable cannot reach beyond merging.
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Resolve the merge token (App → AUTOLAND_PAT → GITHUB_TOKEN)
         id: token
         # Runs unconditionally so the decision is recorded on every path,
         # including the ones that end up enabling nothing. `secrets` is only
-        # readable from step-level `env:`/`with:` (never a job `if:`), and the
-        # comparison yields a plain "true"/"false" — the secret itself is never
+        # readable from step-level `env:`/`with:` (never a job `if:`), and each
+        # comparison yields a plain "true"/"false" — no token is ever
         # interpolated here, so nothing lands in the log.
         env:
+          HAS_APP: ${{ steps.app_token.outputs.token != '' }}
           HAS_PAT: ${{ secrets.AUTOLAND_PAT != '' }}
         run: |
           set -euo pipefail
-          if [ "$HAS_PAT" = "true" ]; then
+          if [ "$HAS_APP" = "true" ]; then
+            echo "mode=release-bot App" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Auto-lander merge token"
+              echo ""
+              echo "✅ Using the \`rarebit-one\` **App installation token** — the merge is attributed to the App, not the ambient token, so downstream \`push\` / \`workflow_run\` workflows (deploy, sentry-release) WILL fire."
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$HAS_PAT" = "true" ]; then
             echo "mode=AUTOLAND_PAT" >> "$GITHUB_OUTPUT"
             {
               echo "### Auto-lander merge token"
               echo ""
               echo "✅ Using \`AUTOLAND_PAT\` — the merge will be attributed to a real user, so downstream \`push\` / \`workflow_run\` workflows (deploy, sentry-release) WILL fire."
+              echo ""
+              echo "_Note: the App token was not available here. That is expected only on repos outside the \`rarebit-one\` App installation._"
             } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "mode=GITHUB_TOKEN (degraded)" >> "$GITHUB_OUTPUT"
-            echo "::warning::AUTOLAND_PAT is not available to this repo — falling back to GITHUB_TOKEN. GitHub does not emit workflow-triggering events for GITHUB_TOKEN actions, so the resulting merge will fire NO push event: deploy.yml (workflow_run) and sentry-release.yml (push: main) will NOT run for this merge. Set the org secret AUTOLAND_PAT (visibility: all repositories) to restore them."
+            echo "::warning::Neither the release-bot App token nor AUTOLAND_PAT is available to this repo — falling back to GITHUB_TOKEN. GitHub does not emit workflow-triggering events for GITHUB_TOKEN actions, so the resulting merge will fire NO push event: deploy.yml (workflow_run) and sentry-release.yml (push: main) will NOT run for this merge. Check that the caller passes 'secrets: inherit' and that the rarebit-one App is installed on this repo."
             {
               echo "### Auto-lander merge token"
               echo ""
-              echo "⚠️ **Degraded — \`AUTOLAND_PAT\` not available; falling back to \`GITHUB_TOKEN\`.**"
+              echo "⚠️ **Degraded — no App token and no \`AUTOLAND_PAT\`; falling back to \`GITHUB_TOKEN\`.**"
               echo ""
               echo "The merge will be attributed to \`github-actions[bot]\` and will emit **no \`push\` event**."
               echo "Downstream \`push\`-triggered and \`workflow_run\`-chained workflows (e.g. \`deploy.yml\`, \`sentry-release.yml\`) **will not fire** for this merge."
               echo ""
-              echo "Fix: set an org-level \`AUTOLAND_PAT\` Actions secret on \`rarebit-one\` with visibility *All repositories*."
+              echo "Check, in order:"
+              echo "1. the caller passes \`secrets: inherit\` (without it \`RELEASE_BOT_PRIVATE_KEY\` never reaches this workflow);"
+              echo "2. the \`rarebit-one\` App is installed on this repository;"
+              echo "3. \`RELEASE_BOT_CLIENT_ID\` (org variable) and \`RELEASE_BOT_PRIVATE_KEY\` (org secret) are both visible to it."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -182,13 +242,15 @@ jobs:
           steps.metadata.outputs.dependency-group != ''))
         env:
           # Reads + the approval keep the ambient token. The approval is
-          # deliberately NOT moved to the PAT: it would turn every Dependabot
-          # bump into an approval signed by the maintainer personally, which is
-          # a governance change, not a push-event fix.
+          # deliberately NOT moved to the elevated token: it would turn every
+          # Dependabot bump into an approval attributed to the App (or, with a
+          # PAT, to the maintainer personally), which is a governance change,
+          # not a push-event fix.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # The ENABLE — and only the enable — uses the PAT when present, so the
-          # eventual merge is attributed to a real user and emits a push event.
-          MERGE_TOKEN: ${{ secrets.AUTOLAND_PAT || secrets.GITHUB_TOKEN }}
+          # The ENABLE — and only the enable — uses the elevated token, so the
+          # eventual merge is attributed to a non-ambient identity and emits a
+          # push event. See the TOKEN PRECEDENCE note in the header.
+          MERGE_TOKEN: ${{ steps.app_token.outputs.token || secrets.AUTOLAND_PAT || secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
           set -euo pipefail
@@ -217,7 +279,7 @@ jobs:
         if: github.actor == 'rarebit-one[bot]'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MERGE_TOKEN: ${{ secrets.AUTOLAND_PAT || secrets.GITHUB_TOKEN }}
+          MERGE_TOKEN: ${{ steps.app_token.outputs.token || secrets.AUTOLAND_PAT || secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
           # Engine PRs (issue-worker/*, ci-fix/*, sentry-autofix/*) are already
@@ -247,7 +309,7 @@ jobs:
         if: github.actor == 'jaryl'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MERGE_TOKEN: ${{ secrets.AUTOLAND_PAT || secrets.GITHUB_TOKEN }}
+          MERGE_TOKEN: ${{ steps.app_token.outputs.token || secrets.AUTOLAND_PAT || secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
           # NOTE: no `gh pr review --approve` here, unlike the Dependabot path.
