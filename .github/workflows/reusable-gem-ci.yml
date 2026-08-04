@@ -80,6 +80,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Blocks a PR that introduces a dependency with a known advisory, before it
+  # is merged and published. Nothing in the estate did this: Dependabot raises
+  # advisories only AFTER a vulnerable version is already on main, and
+  # bundler-audit (where consumers run it via extra-lint-commands) audits the
+  # committed lockfile rather than the change the PR proposes.
+  #
+  # These gems are PUBLISHED to RubyGems, so a bad transitive dependency is a
+  # supply-chain issue for every consuming app, not just for this repo.
+  #
+  # Two deliberate constraints:
+  #   * `pull_request` only. The action needs a base and head to diff, which a
+  #     `push` build does not have; on push it would fail rather than no-op.
+  #   * The dependency-review API needs a PUBLIC repo, or GHAS on a private
+  #     one. Every current consumer of this reusable is public. A private gem
+  #     added later would fail here — gate the job on visibility at that point
+  #     rather than dropping it, so the failure stays visible.
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          # Advisory severity that fails the job. `low` would red PRs on
+          # informational advisories with no fix available; `moderate` is the
+          # level at which there is normally something to act on.
+          fail-on-severity: moderate
+          comment-summary-in-pr: on-failure
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
