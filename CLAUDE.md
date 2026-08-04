@@ -41,11 +41,34 @@ Consumers pin to a **moving major tag** (or a specific SHA) rather than `@main`,
 
 | Ref | Workflows |
 |-----|-----------|
-| `@v1` | `reusable-gem-ci`, `sentry-release` |
-| `@v2` | `reusable-gem-release`, `reusable-weekly-maintenance`, `reusable-maven-central-release` |
-| `@main` | `claude-agent`, `claude-code-review`, `deploy-production` (low-contract dispatchers; changes go live immediately on merge) |
+| `@v2` | **every versioned reusable**: `reusable-gem-ci`, `reusable-gem-release`, `reusable-weekly-maintenance`, `reusable-maven-central-release`, `sentry-release` |
+| `@main` | `claude-agent`, `claude-code-review`, `deploy-production`, `dependabot-auto-merge`, `pin-check` and the other low-contract dispatchers — changes go live immediately on merge, by design |
+
+**`v2` is the only live tag.** This table previously said `reusable-gem-ci` and
+`sentry-release` were consumed at `@v1`. They are not, and had not been for
+months: every live gem pins `@v2`, and the only remaining `@v1` references are in
+two **archived** repos. Anyone following the old table would have re-pointed `v1`
+and changed nothing for any live consumer — verified 2026-08-04. `v1` is retained
+only so the archived repos' history resolves; never re-point it.
 
 Because changes ripple across all consumers, test against at least one downstream consumer (e.g. a standard_* gem) before re-pointing a tag. There is no equivalent of `/rollout-gem` for these workflows.
+
+**Re-point the tag in the same session as the merge.** The tag is the delivery
+mechanism, not the merge — a change sitting on `main` behind a stale tag reaches
+nobody while appearing shipped. On 2026-08-04 `v2` was found 20 commits and four
+weeks behind `main`, so every gem had been running July-vintage shared CI:
+runaway-timeout caps, auto-lander fixes and a CodeQL data-gap fix were all merged
+but undelivered.
+
+```bash
+# after merging a change to a versioned reusable, and after the downstream test:
+gh api -X PATCH repos/rarebit-one/.github/git/refs/tags/v2 \
+  -f "sha=$(gh api repos/rarebit-one/.github/commits/main --jq .sha)" -F force=true
+```
+
+That downstream test is not a formality: it is what caught a `dependency-review`
+job that failed on every gem (Dependency graph not enabled) before the tag move
+could take all 8 gems red at once.
 
 ## Claude model
 
