@@ -11,9 +11,12 @@ name: Pin Check
 #      the repo's `.github/zizmor.yml` if present, else an owner-scoped policy
 #      synthesized from `github.repository_owner` (portable across every org).
 #
-#   2. pinact --check (secondary) — a tight, config-aware second opinion that
-#      honors the repo's `.pinact.yaml` (first-party + local ignores, plus the
-#      anthropics/claude-code-action semver-comment exemption).
+#   2. pinact --check (secondary) — a tight, config-aware second opinion. It runs
+#      against a RUNTIME-SYNTHESIZED `/tmp/pinact.yaml` built from the caller's
+#      owner (first-party + local ignores + the anthropics/claude-code-action
+#      semver-comment exemption) — it deliberately does NOT read any committed
+#      `.pinact.yaml`, so the gate behaves identically on every repo and a repo
+#      cannot weaken its own gate by editing a file it controls.
 #
 #
 #   3. pin integrity (third) — resolves every third-party pin against the action's
@@ -45,6 +48,10 @@ on:
         default: ''
 
 permissions: {}
+
+env:
+  PINACT_VERSION: '4.1.0'
+  PINACT_SHA256: '8fcbf1b3e95551c82fd995535e3c1defa70e23299ce36eb3afd6c98778de6ca0'
 
 jobs:
   pin-check:
@@ -146,14 +153,42 @@ jobs:
           sys.exit(1)
           PY
 
-      # Secondary, config-aware check: honors the repo's .pinact.yaml (first-party
-      # + local ignores + the claude-code-action semver-comment exemption).
-      # `fix: "false"` = check-only; fails the job on any unpinned action.
-      - name: pinact — verify pins (honors .pinact.yaml)
+      # Secondary, config-aware check. Honors a RUNTIME-SYNTHESIZED config (built
+      # from the caller's owner) rather than any committed .pinact.yaml, so the
+      # gate is deterministic across every repo: first-party + local composites
+      # are ignored, and anthropics/claude-code-action is exempt from the
+      # semver-comment nit only (it stays SHA-pinned — zizmor still enforces that).
+      - name: pinact — verify pins (runtime-synthesized config)
         if: steps.prep.outputs.paths != ''
-        uses: suzuki-shunsuke/pinact-action@896d595f299e71d65b9d28349d6956abe144390a # v3.0.0
-        with:
-          fix: "false"
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}"
+          curl -fsSL -o pinact.tar.gz \
+            "https://github.com/suzuki-shunsuke/pinact/releases/download/v${PINACT_VERSION}/pinact_linux_amd64.tar.gz"
+          echo "${PINACT_SHA256}  pinact.tar.gz" | sha256sum -c -
+          tar -xzf pinact.tar.gz pinact
+          install -m 0755 pinact /usr/local/bin/pinact
+          pinact --version
+
+          cat > /tmp/pinact.yaml <<EOF
+          version: 3
+          ignore_actions:
+            # First-party org actions/reusables are consumed at a moving ref by design.
+            - name: ${OWNER}/.*
+              ref: .*
+            # Local composite actions have no upstream ref to pin.
+            - name: \\./.*
+              ref: .*
+            # Deliberately SHA-pinned to a main-branch commit; exempt from the
+            # semver-comment check only (still SHA-pinned). See octo-brain convention.
+            - name: anthropics/claude-code-action
+              ref: .*
+          EOF
+
+          cd "$GITHUB_WORKSPACE"
+          pinact run --check -c /tmp/pinact.yaml
 
       # Third, independent check: pin INTEGRITY. zizmor and pinact both only prove
       # a ref is SHAPED like a commit SHA -- neither resolves it. A well-formed pin
