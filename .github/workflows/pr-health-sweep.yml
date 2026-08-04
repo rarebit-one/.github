@@ -1,0 +1,78 @@
+name: PR-health sweep
+
+# Org-level companion to dependabot-sweep.yml, for the PRs that workflow cannot
+# see. dependabot-sweep gates on `--author app/dependabot` and rebases via a
+# `@dependabot rebase` comment; human- and agent-authored PRs hit the same two
+# walls with nothing behind them:
+#
+#   1. Native auto-merge NEVER updates a branch, so on a strict "branches must be
+#      up to date" repo an ARMED PR that falls BEHIND stalls forever — green,
+#      mergeable, going nowhere.
+#   2. A head commit can end up with NO check-runs at all, so the PR shows the
+#      PREVIOUS commit's red X and nothing pending. One such fix sat correct and
+#      invisible for six days in sidekick-labs, where this workflow originated.
+#
+# One cron for the whole org — not a per-repo workflow — to keep Actions minutes
+# down, matching dependabot-sweep.yml's design. See scripts/pr-health-sweep.sh
+# for the full rationale and the one-update-per-repo-per-pass pacing.
+#
+# This workflow never merges. Phase 1 hands a PR back to native auto-merge, which
+# lands it once CI is green; Phases 2 and 3 are report-only.
+
+on:
+  schedule:
+    - cron: '45 */6 * * *'   # offset 45min from dependabot-sweep (0 */6) so the two never race; :45 also dodges gem-release-tag (:17 hourly) and codeql-actions (Mon 06:30)
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Log decisions without updating any branch'
+        type: boolean
+        default: false
+      stale-draft-days:
+        description: 'Days a draft may sit untouched before it is reported'
+        type: string
+        default: '5'
+
+permissions: {}
+
+concurrency:
+  group: pr-health-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: Sweep PR health
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read   # job token only checks out this repo; updates use the minted App token
+    steps:
+      - name: Mint app token (contents + PRs write across the org)
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: rarebit-one
+          permission-contents: write
+          permission-pull-requests: write
+          # actions:read is REQUIRED, not optional. `repo_runs_ci` calls
+          # repos/{repo}/actions/workflows to tell "this repo has no CI" apart
+          # from "this repo's CI did not run". Without it that call 403s, the
+          # count reads 0, every repo looks CI-less, and Phase 2 reports nothing
+          # forever — the first live run in sidekick-labs did exactly that.
+          permission-actions: read
+
+      - name: Checkout (sweep script)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Sweep
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          ORG: rarebit-one
+          # schedule has no inputs → live; dispatch honours the dry-run toggle.
+          DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+          STALE_DRAFT_DAYS: ${{ inputs.stale-draft-days || '5' }}
+        run: bash .github/scripts/pr-health-sweep.sh
