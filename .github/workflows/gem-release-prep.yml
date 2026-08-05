@@ -287,3 +287,47 @@ jobs:
           [ "$(jq -r '.ok' <<<"$RESP")" = "true" ] \
             && echo "posted." \
             || echo "::warning::Slack post failed: $(jq -r '.error // "unknown"' <<<"$RESP")"
+
+  alert:
+    needs: [discover, prep, narrate]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    # Runaway-hang cap. A single gh issue list/create/close notify step; finishes in
+    # seconds. 5 replaces the implicit 360-min (6h) default.
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Flag failure or clear on recovery
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }} # this job has no checkout, so pin the repo for gh
+          FAILED: ${{ contains(needs.*.result, 'failure') }}
+          SUCCEEDED: ${{ contains(needs.*.result, 'success') }}
+        run: |
+          set -euo pipefail
+          WF="gem-release-prep"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          # NB: this repo has ISSUES DISABLED, so every `gh issue` call here errors. The
+          # issue bookkeeping is therefore BEST-EFFORT (guarded with `|| true`) — otherwise
+          # `set -e` aborts this step on the very first `gh issue list` and a GREEN run
+          # shows red. On a real failure we still emit a ::warning:: so it is visible in
+          # the run; the tracking issue starts working if/when issues are re-enabled.
+          EXISTING="$(gh issue list --search "\"beat failure: ${WF}\" in:title" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+          if [ "${FAILED}" != "true" ]; then
+            # Nothing failed. Close any open failure issue only on a run that ACTUALLY
+            # succeeded — an all-skipped run is not evidence of recovery.
+            if [ "${SUCCEEDED}" = "true" ] && [ -n "$EXISTING" ]; then
+              gh issue close "$EXISTING" --comment "Recovered: ${WF} succeeded — ${RUN_URL}." 2>/dev/null || true
+            fi
+            exit 0
+          fi
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "Failed again: ${RUN_URL}" 2>/dev/null || true
+          else
+            gh issue create \
+              --title "beat failure: ${WF} ($(date -u +%F))" \
+              --body "The \`${WF}\` beat failed before it could report — see ${RUN_URL}" \
+              2>/dev/null \
+              || echo "::warning::${WF} FAILED and issues are unavailable on this repo — see ${RUN_URL}"
+          fi
