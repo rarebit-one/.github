@@ -1,0 +1,642 @@
+# Shared DigitalOcean deployment TRACKER.
+#
+# This workflow does not deploy anything. Every consuming app uses DO's native
+# git integration (`deploy_on_push`), so DigitalOcean has already started the
+# rollout by the time this runs. This job observes it: it polls the DO API for
+# the deployment matching a given commit SHA, waits for a terminal phase,
+# probes the public URL, and reports the outcome to the step summary and the
+# merged PR. A bug here produces a WRONG CI SIGNAL — it cannot break, stall,
+# or roll back a deploy.
+#
+# It is the consolidation of five near-identical per-repo copies
+# (jumpdrive-web, jumpdrive-static, jumpdrive-runner, nutripod-web,
+# rarebit-static-v3) into one superset. Two behaviours here are incident-derived
+# and must not be removed:
+#
+#   1. The public reachability probe (jumpdrive-web#163) — DO reported ACTIVE
+#      while the edge was not routing and every public request 504'd.
+#   2. The CANCELED -> SUPERSEDED disambiguation (originated in
+#      rarebit-static-v3, backported to nutripod-web#1144) — three commits
+#      pushed inside five minutes fired a false 🚨 "production deploy failed"
+#      Slack alert while production was healthy on the newest commit.
+#
+# Everything repo-specific is an input. Defaults are deliberately EMPTY for the
+# two probe paths so a consumer that does not opt in simply skips that leg
+# rather than acquiring a new blocking gate on a path it does not serve.
+name: Track DigitalOcean Deployment
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "GitHub environment name (e.g., staging, production)"
+        required: true
+        type: string
+      environment_url:
+        description: "URL of the deployed environment"
+        required: true
+        type: string
+      expected_commit_sha:
+        description: "The commit SHA that should be deployed"
+        required: true
+        type: string
+      poll_interval:
+        description: "Seconds between DO API polls"
+        required: false
+        type: number
+        default: 15
+      poll_timeout:
+        description: "Maximum seconds to wait for deployment"
+        required: false
+        type: number
+        default: 600
+      health_path:
+        description: >
+          Path probed on environment_url to confirm the deploy is publicly
+          reachable once DO reports ACTIVE (jumpdrive-web#163). This is the
+          BLOCKING gate, and it takes the liveness tier on purpose — the
+          question is whether the ingress is routing traffic, not whether
+          every dependency is up.
+          DEFAULTS TO EMPTY (gate skipped) on purpose: a non-empty shared
+          default would silently impose a new blocking gate on a consumer that
+          does not serve that path, and red a healthy deploy. Every consumer
+          passes its own value explicitly — "/up" (Rails apps), "/health"
+          (jumpdrive-runner), "/health/alive" (nutripod-web), "/" (static
+          sites).
+        required: false
+        type: string
+        default: ""
+      readiness_path:
+        description: >
+          Path probed for a NON-BLOCKING readiness report in the step summary.
+          A 503 here means a critical dependency is down — loud, but not a
+          reason to fail a rollout that did ship the right code. Gating a
+          rollout on readiness is exactly what the estate health convention
+          warns against.
+          Defaults to empty, so consumers without a readiness tier (the static
+          sites, jumpdrive-runner) skip this leg entirely rather than failing
+          on a 404.
+        required: false
+        type: string
+        default: ""
+      enable_triage:
+        description: >
+          Run the post-failure triage step (DO deployment step statuses,
+          per-component restart counts + state, last 40 lines of the DEPLOY
+          and RUN logs). Purely additive diagnostics — it is if:failure() +
+          continue-on-error and can never mask the real error. Static sites
+          get a thinner but still useful report; set false to skip it.
+        required: false
+        type: boolean
+        default: true
+    outputs:
+      deploy_id:
+        description: "The DigitalOcean deployment id that was tracked (empty if none was ever resolved)."
+        value: ${{ jobs.track.outputs.deploy_id }}
+      phase:
+        description: >
+          Terminal DO phase as this tracker judged it. Note SUPERSEDED is
+          re-emitted for a CANCELED-by-a-newer-deploy, so callers can branch on
+          it without re-deriving the heuristic.
+        value: ${{ jobs.track.outputs.phase }}
+    secrets:
+      DIGITALOCEAN_ACCESS_TOKEN:
+        required: true
+      DIGITALOCEAN_APP_ID:
+        required: true
+
+permissions:
+  contents: read
+  deployments: write
+  # Required to post the per-environment deploy-status comment on the
+  # merged PR (see the "Comment deploy status on the merged PR" step).
+  pull-requests: write
+# A called workflow can only receive permissions the CALLER holds. A caller
+# that omits `deployments: write` / `pull-requests: write` does not fail this
+# job — it fails the ENTIRE RUN at startup, with no jobs and no error in the
+# API. Both jumpdrive-static/deploy.yml and nutripod-web/deploy-staging.yml
+# carry scar tissue about exactly that. Never widen or narrow this set without
+# updating all five callers in the same change.
+
+# Deliberately keyed to include the tracked SHA, which makes the group unique
+# per deployment: this satisfies the org rule that every workflow declares a
+# concurrency group WITHOUT serialising anything real. Two live shapes depend
+# on that: jumpdrive-static tracks two apps from one run, and nutripod-web
+# tracks production-sg and production-my from one run — both would deadlock
+# under a coarser group, since each tracker holds the slot for up to
+# poll_timeout. `github.repository` resolves to the CALLER's repo, so the five
+# consumers never share a namespace with each other.
+#
+# The group name must also not collide with any caller's own group: a reusable
+# claiming the caller's group evicts the caller and surfaces as a
+# startup_failure where the job never registers (see the comment in
+# jumpdrive-web/.github/workflows/deploy-production.yml).
+concurrency:
+  group: track-do-deployment-${{ github.repository }}-${{ inputs.environment }}-${{ inputs.expected_commit_sha }}
+  cancel-in-progress: false
+
+jobs:
+  track:
+    name: Track ${{ inputs.environment }} deployment
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_id: ${{ steps.poll.outputs.deploy_id }}
+      phase: ${{ steps.poll.outputs.phase }}
+    # 20, not 15: the poll can run to poll_timeout (600s default) and the
+    # reachability probe adds up to 12 x (10s curl + 10s sleep) = 240s on top.
+    # At 15 a slow-but-succeeding deploy plus a full probe retry would hit the
+    # job cap and surface as an opaque timeout instead of the real error.
+    timeout-minutes: 20
+
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ inputs.environment_url }}
+
+    steps:
+      - name: Wait for DO deployment to complete
+        id: poll
+        env:
+          DO_API_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          DO_APP_ID: ${{ secrets.DIGITALOCEAN_APP_ID }}
+          EXPECTED_SHA: ${{ inputs.expected_commit_sha }}
+          POLL_INTERVAL: ${{ inputs.poll_interval }}
+          POLL_TIMEOUT: ${{ inputs.poll_timeout }}
+          ENVIRONMENT_URL: ${{ inputs.environment_url }}
+          HEALTH_PATH: ${{ inputs.health_path }}
+          READINESS_PATH: ${{ inputs.readiness_path }}
+        run: |
+          echo "Tracking deployment of commit $EXPECTED_SHA to ${{ inputs.environment }}"
+          echo "Polling DO API every ${POLL_INTERVAL}s (timeout: ${POLL_TIMEOUT}s)"
+
+          ELAPSED=0
+
+          while [ "$ELAPSED" -lt "$POLL_TIMEOUT" ]; do
+            # Fetch recent deployments for the app
+            # `if !` keeps a failed curl from tripping the shell's `set -e`
+            # (GitHub's default `bash -eo pipefail`) so a transient API error
+            # retries instead of aborting the step with a cryptic exit code.
+            if ! RESPONSE=$(curl -sf \
+              -H "Authorization: Bearer $DO_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              "https://api.digitalocean.com/v2/apps/$DO_APP_ID/deployments?per_page=50"); then
+              echo "::warning::Failed to fetch deployments from DO API — retrying"
+              sleep "$POLL_INTERVAL"
+              ELAPSED=$((ELAPSED + POLL_INTERVAL))
+              continue
+            fi
+
+            # Find the deployment matching our commit SHA. DO's deployment
+            # object has NO top-level .commit_sha — that field simply doesn't
+            # exist on the API response, so the previous `select(.commit_sha
+            # == $sha)` never matched anything and the tracker always timed
+            # out. For git-push-triggered deploys (DO's GitHub auto-deploy)
+            # the commit lives at .cause_details.git_push.commit_sha;
+            # component .source_commit_hash (services/workers/jobs/static_sites)
+            # is included as a fallback for manual redeploys without a
+            # git_push cause. `first // empty` yields empty when there's no
+            # match; jq's stderr is captured so a malformed API response
+            # surfaces instead of looking identical to "not deployed yet" and
+            # looping to timeout.
+            if ! DEPLOY_INFO=$(echo "$RESPONSE" | jq -r --arg sha "$EXPECTED_SHA" '
+              [ .deployments[]
+                | . as $d
+                | select(
+                    $d.cause_details.git_push.commit_sha == $sha
+                    or ([ ($d.services // [])[], ($d.workers // [])[],
+                          ($d.jobs // [])[], ($d.static_sites // [])[] ]
+                        | any(.source_commit_hash == $sha))
+                  )
+              ]
+              | first // empty
+              | {id: .id, phase: .phase, created_at: .created_at}
+            ' 2>&1); then
+              echo "::warning::Failed to parse DO API response: $DEPLOY_INFO"
+              echo "::warning::Raw response (first 500 chars): $(echo "$RESPONSE" | head -c 500)"
+              DEPLOY_INFO=""
+            fi
+
+            if [ -z "$DEPLOY_INFO" ]; then
+              echo "No deployment found for SHA $EXPECTED_SHA yet (${ELAPSED}s elapsed)"
+              sleep "$POLL_INTERVAL"
+              ELAPSED=$((ELAPSED + POLL_INTERVAL))
+              continue
+            fi
+
+            PHASE=$(echo "$DEPLOY_INFO" | jq -r '.phase')
+            DEPLOY_ID=$(echo "$DEPLOY_INFO" | jq -r '.id')
+            echo "Deployment $DEPLOY_ID — phase: $PHASE (${ELAPSED}s elapsed)"
+            # Expose to downstream steps (the PR-comment step). GITHUB_OUTPUT
+            # is append-mode; repeated writes simply take the last value,
+            # which is what we want — the comment step needs the terminal
+            # phase + deployment id, not whatever was seen mid-loop.
+            echo "deploy_id=$DEPLOY_ID" >> "$GITHUB_OUTPUT"
+            echo "phase=$PHASE" >> "$GITHUB_OUTPUT"
+
+            case "$PHASE" in
+              ACTIVE)
+                echo ""
+                echo "DO reports ACTIVE for commit $EXPECTED_SHA on ${{ inputs.environment }}"
+
+                # DO ACTIVE means the rollout finished — it does NOT mean the
+                # edge/ingress is actually routing public traffic to the
+                # container. In jumpdrive-web#163 a healthy container sat
+                # ACTIVE 10/10 while every public request 504'd because the DO
+                # ingress route was stale — without this probe that deploy
+                # reported green. Probing the live URL makes an
+                # edge-unreachable-but-ACTIVE deploy fail CI
+                # (steps.poll.outcome=failure → the PR-comment branch below and
+                # any caller-side Slack narration both report the failure)
+                # instead of sailing through. Retries absorb normal edge
+                # propagation.
+                #
+                # This gate takes the LIVENESS tier deliberately: the question
+                # is "is the ingress routing traffic", not "is every dependency
+                # up". Readiness is reported below, non-blocking, because a
+                # degraded-but-serving app is a deploy that succeeded.
+                if [ -n "$HEALTH_PATH" ]; then
+                  HEALTH_URL="${ENVIRONMENT_URL%/}${HEALTH_PATH}"
+                  echo "Verifying public reachability: $HEALTH_URL"
+                  REACHABLE=""
+                  for attempt in $(seq 1 12); do
+                    # `|| true` AFTER the assignment, not `|| echo "000"` inside
+                    # it: curl's own -w already writes 000 on a connection-level
+                    # failure (refused/DNS/--max-time), so an inner fallback
+                    # double-writes and yields "000000" -- which then lands in
+                    # the ::error:: an on-call engineer reads. Dropping the
+                    # fallback entirely is NOT the fix either: curl also exits
+                    # non-zero there, and GitHub runs `bash -e`, so the step
+                    # would abort mid-loop on the very failure this detects.
+                    CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$HEALTH_URL") || true
+                    echo "reachability attempt $attempt/12: HTTP $CODE"
+                    if [ "$CODE" -ge 200 ] && [ "$CODE" -lt 400 ]; then
+                      REACHABLE="$CODE"; break
+                    fi
+                    sleep 10
+                  done
+                  if [ -z "$REACHABLE" ]; then
+                    echo "::error::commit $EXPECTED_SHA is ACTIVE on DO but $HEALTH_URL is not publicly reachable (last HTTP ${CODE}) — edge/ingress likely not routing (see jumpdrive-web#163)"
+                    {
+                      echo "### Deployment ACTIVE but unreachable 🚨"
+                      echo ""
+                      echo "- **Environment:** ${{ inputs.environment }}"
+                      echo "- **Commit:** \`$EXPECTED_SHA\`"
+                      echo "- **DO Deployment ID:** \`$DEPLOY_ID\`"
+                      echo "- **Probe:** \`$HEALTH_URL\` → last HTTP \`${CODE}\` (no 2xx/3xx in 12 tries)"
+                      echo ""
+                      echo "DO finished the rollout but the app is not answering public requests. Force-rebuild re-provisions the ingress route: \`doctl apps create-deployment <app-id> --force-rebuild\`."
+                    } >> "$GITHUB_STEP_SUMMARY"
+                    exit 1
+                  fi
+                  echo "App is publicly reachable ($HEALTH_URL → HTTP $REACHABLE)"
+                fi
+
+                # Readiness report — NON-BLOCKING. A 503 means a critical
+                # dependency (DB/queue) is down: worth surfacing loudly, but
+                # not a reason to fail a rollout that shipped the right code.
+                READY_LINE=""
+                if [ -n "$READINESS_PATH" ]; then
+                  READY_URL="${ENVIRONMENT_URL%/}${READINESS_PATH}"
+                  # Same reasoning as the reachability probe above: `|| true`
+                  # after the assignment, so curl's own trailing 000 isn't
+                  # doubled and `bash -e` doesn't abort the step.
+                  RAW=$(curl -s --max-time 10 -w '\n%{http_code}' "$READY_URL") || true
+                  READY_CODE=$(printf '%s' "$RAW" | tail -n1)
+                  READY_STATUS=$(printf '%s' "$RAW" | sed '$d' | jq -r '.status // "unparseable"' 2>/dev/null || echo "unparseable")
+                  # jq exits 0 with NO output on empty input, so an empty body
+                  # (curl failure, 204, HTML error page) leaves READY_STATUS
+                  # blank rather than falling through to the // default.
+                  [ -z "$READY_STATUS" ] && READY_STATUS="unparseable"
+                  echo "Readiness: $READY_URL → HTTP $READY_CODE (status=$READY_STATUS)"
+                  if [ "$READY_CODE" = "200" ]; then
+                    READY_LINE="- **Readiness:** \`$READY_URL\` → HTTP \`$READY_CODE\`, status \`$READY_STATUS\` ✅"
+                  else
+                    echo "::warning::readiness at $READY_URL returned HTTP $READY_CODE (status=$READY_STATUS) — deployed and reachable, but a critical dependency looks down"
+                    READY_LINE="- **Readiness:** \`$READY_URL\` → HTTP \`$READY_CODE\`, status \`$READY_STATUS\` ⚠️ (not gating)"
+                  fi
+                fi
+
+                echo ""
+                echo "Deployment succeeded — commit $EXPECTED_SHA is live on ${{ inputs.environment }}"
+                echo ""
+                echo "### Deployment Successful" >> "$GITHUB_STEP_SUMMARY"
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo "- **Environment:** ${{ inputs.environment }}" >> "$GITHUB_STEP_SUMMARY"
+                echo "- **Commit:** \`$EXPECTED_SHA\`" >> "$GITHUB_STEP_SUMMARY"
+                echo "- **DO Deployment ID:** \`$DEPLOY_ID\`" >> "$GITHUB_STEP_SUMMARY"
+                echo "- **URL:** ${{ inputs.environment_url }}" >> "$GITHUB_STEP_SUMMARY"
+                if [ -n "$HEALTH_PATH" ]; then
+                  echo "- **Public reachability:** \`${ENVIRONMENT_URL%/}${HEALTH_PATH}\` → HTTP \`$REACHABLE\` ✅" >> "$GITHUB_STEP_SUMMARY"
+                fi
+                if [ -n "$READY_LINE" ]; then
+                  echo "$READY_LINE" >> "$GITHUB_STEP_SUMMARY"
+                fi
+                exit 0
+                ;;
+              ERROR)
+                echo "::error::Deployment failed — DO reported ERROR for commit $EXPECTED_SHA"
+                echo ""
+                echo "### Deployment Failed" >> "$GITHUB_STEP_SUMMARY"
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo "- **Environment:** ${{ inputs.environment }}" >> "$GITHUB_STEP_SUMMARY"
+                echo "- **Commit:** \`$EXPECTED_SHA\`" >> "$GITHUB_STEP_SUMMARY"
+                echo "- **DO Deployment ID:** \`$DEPLOY_ID\`" >> "$GITHUB_STEP_SUMMARY"
+                echo "- **Phase:** ERROR" >> "$GITHUB_STEP_SUMMARY"
+                exit 1
+                ;;
+              CANCELED)
+                # DO uses CANCELED for TWO different things, and only one is a
+                # failure of this pipeline:
+                #   1. a newer deployment started and cancelled this in-flight one
+                #      — benign, and identical in meaning to SUPERSEDED below;
+                #   2. a genuine abort (cancelled by hand, or DO gave up).
+                # Treating both as red made three commits pushed within five
+                # minutes fire a 🚨 "Production deploy failed" Slack alert while
+                # production was in fact healthy on the newest commit. False
+                # alerts are worse than no alerts — they train everyone to ignore
+                # the channel.
+                # Distinguish them by fact, not guess: if DO holds a deployment
+                # created after this one, this was superseded in all but name.
+                DEPLOY_CREATED=$(echo "$DEPLOY_INFO" | jq -r '.created_at')
+                NEWER_COUNT=$(echo "$RESPONSE" | jq -r --arg ts "$DEPLOY_CREATED" \
+                  '[.deployments[] | select(.created_at > $ts)] | length' 2>/dev/null || echo 0)
+                if [ "${NEWER_COUNT:-0}" -gt 0 ]; then
+                  echo "::warning::Deployment was cancelled by a newer deployment ($NEWER_COUNT newer found) — not a failure"
+                  # Re-emit the phase as SUPERSEDED. Downstream consumers (the
+                  # PR-comment step below) branch on JOB_STATUS + DO_PHASE and
+                  # already special-case SUPERSEDED — so leaving this as CANCELED
+                  # while exiting 0 would fall through to the generic success
+                  # branch and announce a commit that never went live as "is
+                  # live", trading a false failure for a false success.
+                  # GITHUB_OUTPUT is append-mode and the last write wins.
+                  echo "phase=SUPERSEDED" >> "$GITHUB_OUTPUT"
+                  echo ""
+                  echo "### Deployment Superseded (cancelled by a newer deploy)" >> "$GITHUB_STEP_SUMMARY"
+                  echo "" >> "$GITHUB_STEP_SUMMARY"
+                  echo "DO cancelled this deployment because a newer one started. That newer deployment's own tracking run reports the live result." >> "$GITHUB_STEP_SUMMARY"
+                  echo "" >> "$GITHUB_STEP_SUMMARY"
+                  echo "- **Environment:** ${{ inputs.environment }}" >> "$GITHUB_STEP_SUMMARY"
+                  echo "- **Commit:** \`$EXPECTED_SHA\`" >> "$GITHUB_STEP_SUMMARY"
+                  echo "- **DO Deployment ID:** \`$DEPLOY_ID\`" >> "$GITHUB_STEP_SUMMARY"
+                  echo "- **Newer deployments:** $NEWER_COUNT" >> "$GITHUB_STEP_SUMMARY"
+                  exit 0
+                fi
+                echo "::error::Deployment was canceled on DO (no newer deployment — genuine abort)"
+                echo ""
+                echo "### Deployment Canceled" >> "$GITHUB_STEP_SUMMARY"
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo "- **Environment:** ${{ inputs.environment }}" >> "$GITHUB_STEP_SUMMARY"
+                echo "- **Commit:** \`$EXPECTED_SHA\`" >> "$GITHUB_STEP_SUMMARY"
+                echo "- **DO Deployment ID:** \`$DEPLOY_ID\`" >> "$GITHUB_STEP_SUMMARY"
+                exit 1
+                ;;
+              SUPERSEDED)
+                # For staging with cancel-in-progress, the workflow itself gets canceled
+                # before reaching this state. This handles the edge case where DO supersedes
+                # a deployment independently. A newer deployment taking over isn't a failure
+                # of this pipeline — that newer deployment's own tracking run reports the
+                # live result — so exit cleanly rather than flagging a false red.
+                echo "::warning::Deployment was superseded by a newer deployment"
+                echo ""
+                echo "### Deployment Superseded" >> "$GITHUB_STEP_SUMMARY"
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo "A newer deployment replaced this one before it completed. The newer deployment's tracking run reports the live result." >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+                ;;
+              BUILDING|DEPLOYING|PENDING_BUILD|PENDING_DEPLOY)
+                # Still in progress — keep polling
+                ;;
+              *)
+                echo "Unknown phase: $PHASE — continuing to poll"
+                ;;
+            esac
+
+            sleep "$POLL_INTERVAL"
+            ELAPSED=$((ELAPSED + POLL_INTERVAL))
+          done
+
+          echo "::error::Timed out after ${POLL_TIMEOUT}s waiting for deployment of $EXPECTED_SHA"
+          echo ""
+          echo "### Deployment Timed Out" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "No successful deployment detected within ${POLL_TIMEOUT}s." >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+      - name: Triage the failure (DO phases, restarts, logs)
+        # Runs only when the poll step failed. Its whole job is to answer the
+        # question a bare "startup_failure" or "ERROR" cannot: WHERE did it
+        # break, and was the container ever alive?
+        #
+        # A failed deploy previously produced a phase string and nothing else.
+        # That cannot distinguish a build failure from a migration failure from
+        # a boot crashloop from an app that came up and then failed its health
+        # check -- which are four different fixes.
+        #
+        # continue-on-error + `|| true` throughout: this step must never mask
+        # or replace the real failure. It is additive diagnostics; if the DO
+        # API is unavailable, the original error still stands on its own.
+        if: failure() && inputs.enable_triage
+        continue-on-error: true
+        env:
+          DO_API_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          DO_APP_ID: ${{ secrets.DIGITALOCEAN_APP_ID }}
+          DEPLOY_ID: ${{ steps.poll.outputs.deploy_id }}
+        run: |
+          API="https://api.digitalocean.com/v2/apps/$DO_APP_ID"
+          AUTH=(-H "Authorization: Bearer $DO_API_TOKEN")
+
+          {
+            echo ""
+            echo "### Failure triage 🔍"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -z "$DEPLOY_ID" ]; then
+            {
+              echo "No DigitalOcean deployment id was ever resolved."
+              echo ""
+              echo "That means the failure happened **before DO started a deployment** —"
+              echo "so it is not an app problem. Look at the workflow itself:"
+              echo "caller permissions, missing secrets, or a build that never"
+              echo "triggered \`deploy_on_push\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # 1. Which deployment PHASE failed, and why. This is the single most
+          #    useful line: DO records a per-step reason that the phase string
+          #    throws away.
+          DEP=$(curl -s "${AUTH[@]}" --max-time 20 "$API/deployments/$DEPLOY_ID") || DEP=""
+          if [ -n "$DEP" ]; then
+            {
+              echo "**Deployment steps** (\`$DEPLOY_ID\`):"
+              echo ""
+              echo '```'
+              printf '%s' "$DEP" | jq -r '
+                [.deployment.progress.steps[]?]
+                | .. | objects | select(has("status") and has("name"))
+                | "\(.status | ascii_downcase | (if . == "error" then "FAILED " elif . == "success" then "ok     " else . + " " end))\(.name)\(if .reason then "  <- " + ((.reason.message? // .reason.code? // "") | tostring) else "" end)"
+              ' 2>/dev/null || echo "(could not parse deployment steps)"
+              echo '```'
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # 2. Restart counts. > 0 in the post-deploy window is a near-certain
+          #    crashloop: the container DID start, so the image and migrations
+          #    are fine and the fault is at boot or in the health check.
+          #    0 restarts on a failed deploy points the other way -- it never
+          #    ran at all.
+          COMPONENTS=$(curl -s "${AUTH[@]}" --max-time 20 "$API" \
+            | jq -r '[.app.spec.services[]?.name, .app.spec.workers[]?.name, .app.spec.jobs[]?.name] | .[]' 2>/dev/null) || COMPONENTS=""
+          if [ -n "$COMPONENTS" ]; then
+            {
+              echo "**Component state:**"
+              echo ""
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            while IFS= read -r comp; do
+              [ -z "$comp" ] && continue
+              INFO=$(curl -s "${AUTH[@]}" --max-time 20 "$API/components/$comp/instances" 2>/dev/null) || INFO=""
+              RESTARTS=$(printf '%s' "$INFO" | jq -r '[.instances[]?.restart_count // 0] | add // 0' 2>/dev/null || echo "?")
+              STATE=$(printf '%s' "$INFO" | jq -r '[.instances[]?.state // "unknown"] | unique | join(",")' 2>/dev/null || echo "?")
+              printf '%-24s restarts=%-4s state=%s\n' "$comp" "$RESTARTS" "${STATE:-unknown}" >> "$GITHUB_STEP_SUMMARY"
+            done <<< "$COMPONENTS"
+            {
+              echo '```'
+              echo ""
+              echo "> restarts **> 0** → the container started and then died: boot crashloop or a failing health check."
+              echo "> restarts **0** on a failed deploy → it never started: build, migration, or image problem."
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # 3. Last lines of the RUN and DEPLOY logs. DO hands back a signed
+          #    URL rather than the content, so this is a two-hop fetch.
+          for LOG_TYPE in DEPLOY RUN; do
+            URL=$(curl -s "${AUTH[@]}" --max-time 20 \
+              "$API/deployments/$DEPLOY_ID/logs?type=$LOG_TYPE" \
+              | jq -r '.historic_urls[0] // .live_url // empty' 2>/dev/null) || URL=""
+            [ -z "$URL" ] && continue
+            BODY=$(curl -s --max-time 25 "$URL" 2>/dev/null | tail -n 40) || BODY=""
+            [ -z "$BODY" ] && continue
+            {
+              echo "<details><summary>Last 40 lines — ${LOG_TYPE} log</summary>"
+              echo ""
+              echo '```'
+              printf '%s\n' "$BODY"
+              echo '```'
+              echo ""
+              echo "</details>"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Resolve PR for the tracked commit
+        id: pr
+        # always() so we still post a failure comment when the polling step
+        # exited non-zero. continue-on-error so a transient gh-api hiccup
+        # resolving the PR doesn't flip the comment step into the failure
+        # branch on what was actually a green deploy. Resolves the PR whose
+        # merge commit is the SHA we were tracking — squash, merge-commit,
+        # and rebase strategies all surface here. Empty when there's no PR
+        # (direct push to main), which the comment step then guards on.
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ inputs.expected_commit_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # No stderr suppression — `|| true` already keeps the step green;
+          # surfacing API errors (404 / 401 / rate-limit) in the log is what
+          # we actually want when the comment mysteriously fails to appear.
+          PR=$(gh api "repos/$REPO/commits/$EXPECTED_SHA/pulls" \
+            --jq '.[0].number // empty' || true)
+          echo "number=$PR" >> "$GITHUB_OUTPUT"
+          if [ -n "$PR" ]; then
+            echo "Resolved PR #$PR for $EXPECTED_SHA"
+          else
+            echo "::notice::No PR associated with $EXPECTED_SHA — skipping PR comment"
+          fi
+
+      - name: Comment deploy status on the merged PR
+        # Posts a single, in-place-updated comment per environment so the
+        # PR's author sees the DO deploy outcome for their merge without
+        # hunting through Actions logs. Bidirectional — comments on success,
+        # failure, and the SUPERSEDED race. The marker scopes find-or-edit
+        # per environment, so the comment for staging vs production vs
+        # production-sg/my each maintain themselves independently, and a
+        # rerun refreshes the same comment rather than stacking duplicates.
+        # continue-on-error so a transient API hiccup posting the comment
+        # never masks the underlying deploy outcome.
+        if: always() && steps.pr.outputs.number != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.pr.outputs.number }}
+          EXPECTED_SHA: ${{ inputs.expected_commit_sha }}
+          ENV_NAME: ${{ inputs.environment }}
+          ENV_URL: ${{ inputs.environment_url }}
+          # steps.poll.outcome (vs job.status) pins success/failure to the
+          # actual DO poll outcome — immune to any later step inadvertently
+          # flipping job.status.
+          JOB_STATUS: ${{ steps.poll.outcome }}
+          DO_DEPLOY_ID: ${{ steps.poll.outputs.deploy_id }}
+          DO_PHASE: ${{ steps.poll.outputs.phase }}
+          DO_APP_ID: ${{ secrets.DIGITALOCEAN_APP_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          SHORT_SHA="${EXPECTED_SHA:0:9}"
+          MARKER="<!-- track-do-deployment:${ENV_NAME} -->"
+
+          DO_LINK=""
+          if [ -n "$DO_DEPLOY_ID" ] && [ -n "$DO_APP_ID" ]; then
+            DO_LINK=" · [DO deployment](https://cloud.digitalocean.com/apps/${DO_APP_ID}/deployments/${DO_DEPLOY_ID})"
+          fi
+
+          if [ "$JOB_STATUS" = "success" ] && [ "$DO_PHASE" = "SUPERSEDED" ]; then
+            ICON="🔁"
+            HEADLINE="**${ENV_NAME}** deploy of \`${SHORT_SHA}\` was superseded by a newer deploy"
+            LINKS="[Tracker run](${RUN_URL})${DO_LINK}"
+          elif [ "$JOB_STATUS" = "success" ]; then
+            ICON="✅"
+            HEADLINE="**${ENV_NAME}** deploy of \`${SHORT_SHA}\` is live"
+            LINKS="[Open ${ENV_NAME}](${ENV_URL}) · [Tracker run](${RUN_URL})${DO_LINK}"
+          elif [ "$DO_PHASE" = "CANCELED" ]; then
+            # User-initiated cancel on DO is meaningfully different from ERROR
+            # — nothing broke, the operator stopped it. Surface as a neutral
+            # warning rather than a 🚨 failure.
+            ICON="⚠️"
+            HEADLINE="**${ENV_NAME}** deploy of \`${SHORT_SHA}\` was canceled"
+            LINKS="[Tracker run](${RUN_URL})${DO_LINK}"
+          else
+            ICON="🚨"
+            PHASE_DETAIL="${DO_PHASE:-tracker timed out before any matching DO deployment}"
+            HEADLINE="**${ENV_NAME}** deploy of \`${SHORT_SHA}\` failed (\`${PHASE_DETAIL}\`)"
+            LINKS="[Tracker run](${RUN_URL})${DO_LINK}"
+          fi
+
+          BODY=$(printf '%s\n\n%s %s\n\n%s\n' "$MARKER" "$ICON" "$HEADLINE" "$LINKS")
+
+          # Find an existing comment with our marker (per environment) and
+          # update it in place. Re-runs and successive deploys to the same
+          # env each refresh the same comment instead of stacking duplicates.
+          # `--paginate` walks every page so the marker is found even on
+          # long-running PRs with >100 comments (the previous per_page=100
+          # cap left a latent duplicate-comment bug on the largest threads).
+          EXISTING=$(gh api --paginate "repos/$REPO/issues/${PR}/comments" \
+            | jq -rs --arg marker "$MARKER" \
+              '[.[] | .[] | select(.body | startswith($marker))] | first | .id // empty')
+
+          if [ -n "$EXISTING" ]; then
+            jq -n --arg body "$BODY" '{body:$body}' \
+              | gh api --method PATCH "repos/$REPO/issues/comments/$EXISTING" --input -
+            echo "Updated comment $EXISTING on PR #$PR"
+          else
+            jq -n --arg body "$BODY" '{body:$body}' \
+              | gh api --method POST "repos/$REPO/issues/${PR}/comments" --input -
+            echo "Created new comment on PR #$PR"
+          fi

@@ -20,6 +20,7 @@ Then work inside `.worktrees/<name>/` for the rest of the session.
 - `.github/workflows/reusable-gem-ci.yml` — CI (lint + test matrix) for Ruby gems
 - `.github/workflows/reusable-gem-release.yml` — trusted-publishing release to RubyGems via OIDC
 - `.github/workflows/reusable-weekly-maintenance.yml` — scheduled `bundle outdated` + bundler-audit
+- `.github/workflows/reusable-track-do-deployment.yml` — DigitalOcean deployment **tracker** (observes a `deploy_on_push` rollout, polls the DO API, probes the public URL, comments on the merged PR). Not a deployer.
 - `.github/workflows/claude-agent.yml` — issue-triggered Claude PR agent
 - `.github/workflows/claude-code-review.yml` — PR-triggered Claude review bot
 - `.github/workflows/codeql-actions.yml` — CodeQL scanning for the Actions language

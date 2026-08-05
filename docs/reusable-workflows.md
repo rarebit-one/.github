@@ -631,6 +631,97 @@ jobs:
       claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 ```
 
+## `reusable-track-do-deployment.yml`
+
+Tracks a DigitalOcean App Platform deployment to a terminal phase, verifies the
+app is publicly reachable, and posts the outcome to the merged PR.
+
+**It does not deploy.** Every consumer uses DO's native git integration
+(`deploy_on_push`), so DO has already started the rollout when this runs. This
+observes it. A bug here yields a wrong CI signal — it cannot break, stall, or
+roll back a deploy. (Contrast `sidekick-labs/.github`'s `reusable-deploy-*`,
+which are DOCR *deployers* that rewrite the appspec and delete its `github:`
+block. Different problem; not interchangeable.)
+
+### Inputs
+
+| Input | Required | Default | Notes |
+|-------|----------|---------|-------|
+| `environment` | yes | — | GitHub environment name. Also the PR-comment marker scope, so each environment maintains its own comment. This is where region-awareness lives: `production-sg` / `production-my` are two calls, not a region input. |
+| `environment_url` | yes | — | Public base URL; both probes are appended to it. |
+| `expected_commit_sha` | yes | — | The commit to track. Under `workflow_run`, use `github.event.workflow_run.head_sha` — `github.sha` is the workflow file's commit. |
+| `poll_interval` | no | `15` | Seconds between DO API polls. |
+| `poll_timeout` | no | `600` | Max seconds to wait for a terminal phase. |
+| `health_path` | no | `""` | **Blocking** reachability gate, probed after DO reports ACTIVE. Empty = skipped. Takes the **liveness** tier deliberately. |
+| `readiness_path` | no | `""` | **Non-blocking** readiness report in the step summary. Empty = skipped. Never gates. |
+| `enable_triage` | no | `true` | Post-failure DO triage (step statuses, restart counts, last 40 log lines). Additive only. |
+
+### Outputs
+
+| Output | Notes |
+|--------|-------|
+| `deploy_id` | DO deployment id tracked (empty if none resolved). |
+| `phase` | Terminal phase. `SUPERSEDED` is re-emitted for a CANCELED-by-newer-deploy. |
+
+### Secrets
+
+`DIGITALOCEAN_ACCESS_TOKEN` and `DIGITALOCEAN_APP_ID` (both required). The app-id
+secret is per-app on the caller side — `DO_APP_ID`, `DO_STAGING_APP_ID`,
+`DO_MARKETING_APP_ID`, `DO_DOCS_APP_ID`, `DO_PRODUCTION_APP_ID_SG`/`_MY` — mapped
+onto the single `DIGITALOCEAN_APP_ID` name here. That mapping is what lets one
+repo track several apps from one run.
+
+### Caller permissions — the startup-failure trap
+
+The caller **must** grant `deployments: write` and `pull-requests: write`. A
+called workflow can only receive permissions the caller holds; withhold either
+and the run fails at **startup** — no jobs, no error in the API.
+
+### Why the probe defaults are empty
+
+A non-empty shared default would impose a *new* blocking gate on a consumer that
+does not serve that path and red a healthy deploy. Pass the path explicitly:
+
+| Consumer | `health_path` | `readiness_path` |
+|---|---|---|
+| `jumpdrive-web` (staging + production-deploy) | `/up` | `""` |
+| `jumpdrive-static` (marketing + docs) | `/` | `""` |
+| `jumpdrive-runner` | `/health` | `""` |
+| `rarebit-static-v3` | `""` (no gate today) | `""` |
+| `nutripod-web` (staging, production-sg, production-my) | `/health/alive` | `/health/ready` |
+
+### Two incident-derived behaviours — do not regress
+
+1. **Public reachability probe** (`jumpdrive-web#163`) — DO reported ACTIVE while
+   the edge was not routing and every public request 504'd. `phase == ACTIVE` is
+   not treated as sole ground truth here.
+2. **CANCELED → SUPERSEDED disambiguation** (originated `rarebit-static-v3`,
+   backported in `nutripod-web#1144`) — DO uses CANCELED both for "a newer deploy
+   took over" (benign) and for a genuine abort. Treating both as red fired a
+   false 🚨 in `#releases` while production was healthy. Disambiguated by fact:
+   does DO hold a deployment created after this one.
+
+### Example
+
+```yaml
+  track:
+    needs: deploy
+    uses: rarebit-one/.github/.github/workflows/reusable-track-do-deployment.yml@<sha> # main
+    with:
+      environment: production-sg
+      environment_url: https://www.nutripod.com.sg
+      expected_commit_sha: ${{ needs.promote.outputs.sha }}
+      health_path: /health/alive
+      readiness_path: /health/ready
+    secrets:
+      DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      DIGITALOCEAN_APP_ID: ${{ secrets.DO_PRODUCTION_APP_ID_SG }}
+```
+
+Consumers should pin a **SHA** (`@<sha> # main`) rather than `@main`: after
+consolidation a single edit here reaches five repos at once, and the tracker's
+dangerous failure mode is a false green.
+
 ## Versioning
 
 The `v2` tag is a moving major-version pointer. Backwards-compatible changes
