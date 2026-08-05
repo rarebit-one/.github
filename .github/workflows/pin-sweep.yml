@@ -333,13 +333,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          FAILED: ${{ needs.plan.result == 'failure' || needs.sweep.result == 'failure' }}
+          FAILED: ${{ contains(needs.*.result, 'failure') }}
+          SUCCEEDED: ${{ contains(needs.*.result, 'success') }}
         run: |
           set -euo pipefail
           WF="pin-sweep"
           EXISTING="$(gh issue list --search "\"beat failure: ${WF}\" in:title" --state open --json number --jq '.[0].number // empty')"
           if [ "${FAILED}" != "true" ]; then
-            if [ -n "$EXISTING" ]; then
+            # Nothing failed. Close any open failure issue only on a run that actually
+            # succeeded — an all-skipped or cancelled run is not evidence of recovery.
+            if [ "${SUCCEEDED}" = "true" ] && [ -n "$EXISTING" ]; then
               gh issue close "$EXISTING" --comment "Recovered: ${WF} succeeded — ${RUN_URL}."
             fi
             exit 0
