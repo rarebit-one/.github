@@ -834,6 +834,18 @@ One immutable tag per build — the full commit SHA — plus a single moving
 `:buildcache` tag. No `latest`, nothing moving that could make "what is running"
 ambiguous; the live spec's `image.tag` is the record.
 
+**That immutability is enforced, not assumed.** DOCR tags are mutable, so before
+building, the workflow checks whether the SHA tag already exists; if it does, the
+build is skipped and the existing artifact is what gets promoted. Otherwise a
+re-run for an already-built SHA would silently overwrite the manifest — and a
+rebuild from the same source is not guaranteed byte-identical (base image drift,
+unpinned apt/npm resolution, changed build args), which would make both "the tag
+is a truthful record" and "`promote_only` re-promotes the artifact that was
+tested" quietly false. Skipping is deliberately a no-op rather than an error:
+re-running a deploy is normal. To force a genuine rebuild, delete the tag from
+DOCR first — a conscious act, because anything already promoted from it stops
+being reproducible.
+
 The build cache is `mode=max` deliberately: these Dockerfiles are multi-stage
 and every expensive layer (`bundle install`, `npm ci`, `assets:precompile`)
 lives in a stage discarded from the final image, so `mode=min` would export none
