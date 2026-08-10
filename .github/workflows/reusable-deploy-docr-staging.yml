@@ -314,13 +314,43 @@ jobs:
           # Never print the file. Confirm shape only.
           jq -r '.auths | keys[]' "${HOME}/.docker/config.json"
 
-      - name: Set up Docker Buildx
+      # ── TAG IMMUTABILITY IS ENFORCED, NOT ASSUMED ────────────────────────────
+      # DOCR tags are MUTABLE. Without this check, a re-run for a `deploy_sha`
+      # that was already built — a retriggered CI run, a manual re-run, a rebuild
+      # weeks later — would silently overwrite the manifest, and a rebuild from
+      # the same source SHA is not guaranteed byte-identical (a base image moved,
+      # an unpinned apt/npm dependency resolved differently, build args changed).
+      # That would quietly break the two claims this whole design rests on: that
+      # the live spec's `image.tag` is a truthful record of what is running, and
+      # that `promote_only` re-promotes the artifact that was actually tested.
+      #
+      # So the SHA tag is write-once: if it exists, the build is skipped and the
+      # existing image is what gets promoted. Deliberately a no-op rather than a
+      # failure — re-running a deploy for an already-built SHA is a normal thing
+      # to do, and the correct answer is "that artifact already exists", not an
+      # error. To genuinely force a rebuild, delete the tag from DOCR first; that
+      # should be a conscious act, because anything already promoted from it is
+      # then no longer reproducible.
+      - name: Is this SHA already built?
+        id: existing
         if: ${{ steps.preflight.outputs.push_capable == 'true' && !inputs.promote_only }}
+        run: |
+          set -uo pipefail
+          if docker buildx imagetools inspect "${IMAGE_REF}" >/dev/null 2>&1; then
+            echo "::notice::${IMAGE_REF} already exists in DOCR — skipping the build. The existing artifact is what will be promoted."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag not present yet — building."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        if: ${{ steps.existing.outputs.exists == 'false' }}
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Build and push image
         id: build_push
-        if: ${{ steps.preflight.outputs.push_capable == 'true' && !inputs.promote_only }}
+        if: ${{ steps.existing.outputs.exists == 'false' }}
         # continue-on-error so a transient DOCR push flake gets one retry below.
         # A genuine build failure still fails the job, at the retry step.
         continue-on-error: true
@@ -591,6 +621,7 @@ jobs:
           DEPLOY_SHA: ${{ inputs.deploy_sha }}
           DOCR_LIVE: ${{ inputs.docr_live }}
           PROMOTE_ONLY: ${{ inputs.promote_only }}
+          ALREADY_BUILT: ${{ steps.existing.outputs.exists }}
         run: |
           set -uo pipefail
 
@@ -609,6 +640,8 @@ jobs:
 
           if [ "${PROMOTE_ONLY}" = "true" ]; then
             MODE_ROW='promote_only (rollback / re-promote — no rebuild)'
+          elif [ "${ALREADY_BUILT}" = "true" ]; then
+            MODE_ROW='build SKIPPED — this SHA was already in DOCR; the existing artifact is what was promoted'
           else
             MODE_ROW='build + push + promote'
           fi
