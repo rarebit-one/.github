@@ -163,6 +163,20 @@ runs:
         APP_ID: ${{ inputs.app_id }}
         POLL_TIMEOUT: ${{ inputs.poll_timeout_seconds }}
         POLL_INTERVAL: ${{ inputs.poll_interval_seconds }}
+        # Consumed by the identity fallback below, when `apps update` omits
+        # in_progress_deployment.id.
+        #
+        # 🔴 env does NOT cross step boundaries. These are also on the
+        # `patch_spec` step, and referencing them here without exporting them
+        # here aborts this step outright, because it runs under `set -u`:
+        #   line 124: IMAGE_REPO: unbound variable
+        # That is exactly how the fallback shipped broken in #100 — and note
+        # `bash -n` does NOT catch an unbound variable, only a syntax error, so
+        # the pre-merge check passed. The failure also lands BEFORE the sentinel
+        # assignments, so this step breaks its own "never exit non-zero" contract
+        # and the caller gets an empty phase instead of a diagnosable one.
+        IMAGE_REPO: ${{ inputs.image_repo }}
+        DEPLOY_SHA: ${{ inputs.deploy_sha }}
       run: |
         set -uo pipefail
         # This step NEVER exits non-zero (see the action description): it
