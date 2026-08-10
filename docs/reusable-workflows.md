@@ -746,6 +746,95 @@ Consumers should pin a **SHA** (`@<sha> # main`) rather than `@main`: after
 consolidation a single edit here reaches five repos at once, and the tracker's
 dangerous failure mode is a false green.
 
+## `reusable-deploy-docr-staging.yml`
+
+The **build-once / promote** staging deployer (`rarebit-sre#189`). Unlike
+`reusable-track-do-deployment.yml`, which only *observes* a `deploy_on_push`
+rollout, this one produces the artifact and moves it: build the caller's
+Dockerfile at an exact SHA on a GitHub-hosted x64 runner → push to DOCR tagged
+with that SHA → patch **only** the live app spec's image reference → poll to
+ACTIVE.
+
+It exists because DigitalOcean builds each environment independently from
+GitHub, so production runs a *different build* from the one staging validated,
+and no rarebit workflow has a rollback path. An immutable per-SHA tag fixes
+both.
+
+### Two things this file will not let you get wrong
+
+1. **`runs-on: ubuntu-latest` is hardcoded and must stay that way.** DO App
+   Platform runs amd64; the mac-mini-1 self-hosted runners are arm64. Routing the
+   build through `vars.RUNNER_LABEL` would push an arm64 image that builds green
+   and fails at container start inside DO, far from its cause. `platforms:
+   linux/amd64` is set explicitly for the same reason.
+2. **It ships INERT.** `docr_live` must be the literal string `"true"` before the
+   live spec is touched. Unarmed it still builds, still pushes, still reads the
+   live spec and still prints the exact promotion — it just does not apply it.
+
+### Inputs
+
+| Input | Required | Default | Notes |
+|-------|----------|---------|-------|
+| `deploy_sha` | yes | — | The SHA CI validated; also the image tag. With `promote_only`, the **existing** tag to promote. |
+| `registry` | yes | — | DOCR registry name (`fundbright`, `luminality`, `rarebit-one`). |
+| `image_repo` | yes | — | Repository within that registry. |
+| `app_url` | yes | — | Ingress URL, for the GitHub Deployment link and summary. |
+| `environment` | no | `staging` | GitHub Deployment environment name. |
+| `dockerfile` / `context` | no | `./Dockerfile` / `.` | Build inputs. |
+| `build_args` | no | `""` | Multiline `KEY=VALUE`. Never secrets — visible in `docker history`. |
+| `build_secrets` / `build_secret_id` | no | `""` | BuildKit secrets; `build_secret_id`'s value comes from the `BUILD_SECRET_VALUE` secret. |
+| `promote_only` | no | `false` | **The rollback path.** Skips build and push; promotes an existing tag after verifying it exists. |
+| `docr_live` | no | `""` | Arming gate. Pass a repo variable so arming is a `gh variable` command, never a code change. |
+| `free_disk_space` | no | `false` | Reclaims ~10 GiB. Runners have ~14 GiB free vs DO's builder's 24 GiB. |
+| `poll_timeout_seconds` | no | `1800` | Terminal-phase poll budget. |
+
+### Secrets
+
+| Secret | Required | Notes |
+|---|---|---|
+| `DIGITALOCEAN_ACCESS_TOKEN` | yes | Must carry **container-registry read+write** *and* App Platform update on the same team. Registry scope is **not** implied by `app:update`. |
+| `DO_APP_ID` | yes | Passed as a secret, not an input: the `secrets` context is unavailable in a caller's `jobs.<id>.with` block, and every consumer stores the app ID as a repo secret. |
+| `BUILD_SECRET_VALUE` | no | Value for `build_secret_id`. |
+
+The caller must grant `contents: read` and `deployments: write` — a reusable
+workflow can only narrow the token.
+
+### How it degrades
+
+A token that cannot obtain read-write registry credentials makes the whole run a
+**loud green no-op**: nothing is built, nothing pushed, nothing patched, and the
+log names the exact operator action. That is deliberate — the credential is the
+second arming mechanism, so this file can be merged and observed for weeks
+before it can touch anything. The interlock that makes every failure path a
+no-op rather than a *partial* action is the "Verify the image tag exists in
+DOCR" step: the spec is never pointed at a tag that is not provably present.
+
+### Rollback
+
+```bash
+# find the last good tag, then:
+gh workflow run deploy-staging.yml -f ref=<last-good-sha> -f promote_only=true
+```
+
+No rebuild, no DO console, and nothing can silently overwrite it: once promoted
+this way the app has no git source, so there is no `deploy_on_push` to clobber
+the rollback on the next merge.
+
+### Tagging and registry growth
+
+One immutable tag per build — the full commit SHA — plus a single moving
+`:buildcache` tag. No `latest`, nothing moving that could make "what is running"
+ambiguous; the live spec's `image.tag` is the record.
+
+The build cache is `mode=max` deliberately: these Dockerfiles are multi-stage
+and every expensive layer (`bundle install`, `npm ci`, `assets:precompile`)
+lives in a stage discarded from the final image, so `mode=min` would export none
+of them and leave a 2 vCPU runner doing a cold build on every push. The
+consequence is that superseded cache manifests orphan blobs in the registry.
+Those are reclaimed by **DOCR garbage collection**, which is what to schedule —
+deleting *tags* does not touch them. Treat that as registry legibility and tag
+hygiene; storage overage is $0.02/GiB and is not the reason.
+
 ## Versioning
 
 The `v2` tag is a moving major-version pointer. Backwards-compatible changes
