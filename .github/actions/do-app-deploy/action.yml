@@ -211,6 +211,16 @@ runs:
         # Capture stderr separately — `doctl --output json` writes only
         # JSON to stdout, but warnings (deprecations, retries) land on
         # stderr. Mixing them would make jq trip over the JSON envelope.
+        # Anchor for the identity fallback below. MUST be read BEFORE the update
+        # is sent: it is the lower bound that makes "created since our request"
+        # meaningful, and a timestamp taken afterwards could exclude our own
+        # deployment. One second of slack absorbs clock skew between this runner
+        # and DO's API — erring toward including our deployment, since the image
+        # match is what actually discriminates.
+        UPDATE_SENT_AT=$(date -u -d '1 second ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+          || date -u -v-1S +%Y-%m-%dT%H:%M:%SZ)
+        echo "Update sent at (anchor for id resolution): $UPDATE_SENT_AT"
+
         UPDATE_JSON=$(doctl apps update "$APP_ID" --spec /tmp/spec.yaml --output json 2>/tmp/do-update-stderr) || {
           # In `--output json` mode doctl emits API errors as a JSON envelope
           # on stdout (captured into $UPDATE_JSON) and leaves stderr empty —
@@ -227,16 +237,67 @@ runs:
           fail "PARSE_FAILED"
         fi
 
-        # The deployment is created synchronously with the spec update, so its
-        # id is in this response. We deliberately do NOT fall back to a fresh
-        # `doctl apps get` when it's missing: on a fast-failing deploy DO
-        # promotes the rollback into `in_progress_deployment` within seconds, so
-        # a refetch could capture the rollback's id and poll the WRONG
-        # deployment to ACTIVE — reintroducing the exact rollback-shadowing this
-        # id-at-the-source approach exists to avoid. Absence is therefore fatal.
+        # USUALLY the deployment is created synchronously with the spec update
+        # and its id is right here in the response. That is the happy path and
+        # it stays the preferred source: the id is captured before DO can do
+        # anything else, so no later state can shadow it.
         DEPLOY_ID=$(echo "$UPDATE_JSON" | jq -r '.[0].in_progress_deployment.id // ""')
+
+        # …but it is NOT guaranteed. MEASURED 2026-08-11 on fundbright-web
+        # staging, on this composite's first real execution: `apps update`
+        # returned 200 with the updated app and `in_progress_deployment: null`,
+        # while DO created deployment 3e676453 moments later and rolled it out
+        # to ACTIVE perfectly. The spec patch was correct and the app was
+        # healthy; only our ability to WATCH it failed. The job went red with
+        # `NO_DEPLOY_ID` over a deploy that had in fact succeeded.
+        #
+        # A false red here is not harmless: it says "staging is broken" about a
+        # healthy staging, and the documented response to a failed promotion is
+        # to roll back — so the likely reaction is to revert a good deploy.
+        #
+        # 🔴 WHY THE OBVIOUS FALLBACK IS WRONG, and what this does instead.
+        # The previous comment here refused any fallback, for a real reason
+        # worth preserving: on a fast-FAILING deploy, DO promotes its automatic
+        # rollback into `in_progress_deployment` within seconds. A naive
+        # "refetch and take the newest/in-progress deployment" would then poll
+        # the ROLLBACK to ACTIVE and report success for a deploy that failed.
+        # That is strictly worse than a false red.
+        #
+        # So resolve by IDENTITY, never by recency alone. Our deployment is the
+        # one whose spec carries the exact image we just wrote; a rollback
+        # necessarily carries the PREVIOUS spec, so it cannot match. Both
+        # conditions must hold:
+        #   1. created_at >= the instant we sent the update (no pre-existing
+        #      deployment can qualify), and
+        #   2. EVERY component pinned to $IMAGE_REPO:$DEPLOY_SHA (a rollback to
+        #      a different image is excluded by construction).
+        # Then take the OLDEST match — if a rollback of our own deploy somehow
+        # also matched, ours was created first.
         if [ -z "$DEPLOY_ID" ]; then
-          echo "::error::doctl apps update response did not include in_progress_deployment.id"
+          echo "::warning::apps update returned no in_progress_deployment.id — resolving the deployment by identity (see comment). This is a known DO race, not a failure."
+          for attempt in 1 2 3 4 5 6; do
+            sleep 5
+            LIST_JSON=$(doctl apps list-deployments "$APP_ID" --output json 2>/dev/null) || LIST_JSON='[]'
+            DEPLOY_ID=$(echo "$LIST_JSON" | jq -r \
+              --arg since "$UPDATE_SENT_AT" --arg repo "$IMAGE_REPO" --arg sha "$DEPLOY_SHA" '
+              [ .[]
+                | select(.created_at >= $since)
+                | select(
+                    ( [ (.spec.services // [])[], (.spec.workers // [])[], (.spec.jobs // [])[] ] ) as $c
+                    | ($c | length) > 0
+                      and ($c | all(.image.repository == $repo and .image.tag == $sha))
+                  )
+              ] | sort_by(.created_at) | first | .id // ""')
+            if [ -n "$DEPLOY_ID" ]; then
+              echo "Resolved deployment by identity after ${attempt} attempt(s): $DEPLOY_ID"
+              break
+            fi
+          done
+        fi
+
+        if [ -z "$DEPLOY_ID" ]; then
+          echo "::error::Could not determine the deployment id: absent from the update response, and no deployment created since ${UPDATE_SENT_AT} is pinned to ${IMAGE_REPO}:${DEPLOY_SHA}."
+          echo "The spec patch itself may still have applied — CHECK THE LIVE SPEC before assuming nothing happened."
           echo "$UPDATE_JSON" | jq '.[0] | {id, phase: .phase, in_progress: .in_progress_deployment, active: .active_deployment}' 2>/dev/null || true
           fail "NO_DEPLOY_ID"
         fi
