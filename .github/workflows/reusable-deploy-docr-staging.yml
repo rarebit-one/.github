@@ -164,15 +164,21 @@ on:
         description: "Value for the BuildKit secret named by `build_secret_id`. Unset → nothing extra is mounted."
         required: false
 
-permissions:
-  contents: read
-  # For the GitHub Deployment lifecycle steps. A reusable workflow can only
-  # NARROW the caller's token, never widen it — the caller must grant this too.
-  deployments: write
+# Scoped at the job, not here: with one job the two are equivalent in effect, but
+# a workflow-level `deployments: write` would silently widen any job added later.
+permissions: {}
 
 jobs:
   deploy:
     name: Build → DOCR → promote (${{ inputs.environment }})
+    permissions:
+      # Checkout of the caller's repo at deploy_sha.
+      contents: read
+      # The GitHub Deployment lifecycle steps (create / in_progress / final
+      # status). A reusable workflow can only NARROW the caller's token, never
+      # widen it — the CALLER must grant `deployments: write` too, or the run
+      # fails at startup with no job and no API error.
+      deployments: write # create + finish the GitHub Deployment record
     # 🔴 HARDCODED ON PURPOSE — see the ARCHITECTURE note in the header. Do not
     # replace this with `${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}`: the
     # self-hosted runners this estate uses are arm64 and DO App Platform is amd64.
@@ -292,6 +298,13 @@ jobs:
           # a single API call — and it reuses the same endpoint the preflight
           # already proved works, so login cannot fail for a reason preflight
           # would have caught.
+          #
+          # Deliberate simplification: `promote_only` never pushes, so read-only
+          # registry credentials would technically suffice for it. Both paths ask
+          # for read-write anyway, because the credential shape this pipeline is
+          # provisioned with is a single push-capable token (see the docs), and a
+          # second read-only code path would be untested weight for no gain. If a
+          # read-only rollback ever matters, split the probe — do not weaken it.
           curl -sf -H "Authorization: Bearer ${DO_TOKEN}" \
             "https://api.digitalocean.com/v2/registry/docker-credentials?read_write=true&expiry_seconds=7200" \
             -o /tmp/docr-config.json
@@ -369,6 +382,8 @@ jobs:
       - name: Verify the image tag exists in DOCR
         id: verify_image
         if: ${{ steps.preflight.outputs.push_capable == 'true' }}
+        env:
+          PROMOTE_ONLY: ${{ inputs.promote_only }}
         run: |
           set -uo pipefail
           if docker buildx imagetools inspect "${IMAGE_REF}" > /tmp/manifest.txt 2>&1; then
@@ -377,7 +392,7 @@ jobs:
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::${IMAGE_REF} is NOT present in DOCR — nothing will be promoted."
-            if [ "${{ inputs.promote_only }}" = "true" ]; then
+            if [ "${PROMOTE_ONLY}" = "true" ]; then
               echo "::error::promote_only was requested for a tag that does not exist. Check the SHA; no rollback was performed."
               echo "present=false" >> "$GITHUB_OUTPUT"
               exit 1
@@ -408,6 +423,8 @@ jobs:
         if: ${{ steps.preflight.outputs.app_readable == 'true' && steps.doctl.outcome == 'success' }}
         env:
           APP_ID: ${{ secrets.DO_APP_ID }}
+          IMAGE_REPO: ${{ inputs.image_repo }}
+          DEPLOY_SHA: ${{ inputs.deploy_sha }}
         run: |
           set -uo pipefail
           if ! doctl apps spec get "$APP_ID" --format json > /tmp/live-spec.json 2>/tmp/spec-err; then
@@ -448,8 +465,8 @@ jobs:
 
           echo "Every component above WOULD be repointed to:"
           echo "    registry_type: DOCR"
-          echo "    repository:    ${{ inputs.image_repo }}"
-          echo "    tag:           ${{ inputs.deploy_sha }}"
+          echo "    repository:    ${IMAGE_REPO}"
+          echo "    tag:           ${DEPLOY_SHA}"
           echo "(i.e. ${IMAGE_REF})"
           echo "Nothing else in the spec is touched — env vars, sizing, alerts and"
           echo "health checks are read from live and written back unchanged."
@@ -513,12 +530,35 @@ jobs:
           deploy_sha: ${{ inputs.deploy_sha }}
           poll_timeout_seconds: ${{ inputs.poll_timeout_seconds }}
 
-      - name: Fail the job if the rollout did not reach ACTIVE
-        if: ${{ inputs.docr_live == 'true' && steps.do_deploy.outcome != 'skipped' && steps.do_deploy.outputs.outcome != 'success' }}
+      - name: Gate — an ARMED run must actually have promoted something
+        if: ${{ inputs.docr_live == 'true' }}
+        env:
+          DEPLOY_STEP_OUTCOME: ${{ steps.do_deploy.outcome }}
+          DO_OUTCOME: ${{ steps.do_deploy.outputs.outcome }}
+          DO_PHASE: ${{ steps.do_deploy.outputs.phase }}
         run: |
-          echo "::error::Promotion did not succeed (phase '${{ steps.do_deploy.outputs.phase }}', expected ACTIVE)."
-          echo "Roll back by re-running this workflow with promote_only=true and the last good SHA."
-          exit 1
+          set -uo pipefail
+          # Named for the failure it exists to catch, which is NOT "the rollout
+          # errored". `do_deploy` is itself gated on the image interlock and a
+          # readable spec, so an armed run can sail straight past it as SKIPPED —
+          # build fine, push fine, promote nothing — and a gate written only as
+          # `outputs.outcome != 'success'` would have let that exit green while
+          # the summary claimed the spec was patched.
+          #
+          # An armed actuator that mutated nothing is a FAILURE, not a no-op: the
+          # operator asked for a deploy and did not get one. (Unarmed, the same
+          # situation is the intended inert behaviour and this step never runs.)
+          if [ "${DEPLOY_STEP_OUTCOME}" = "skipped" ]; then
+            echo "::error::ARMED, but nothing was promoted — the run never reached the spec patch."
+            echo "The blocking guard is one of: no read-write registry credential, the image tag is not present in DOCR, or the live spec could not be read. The warnings above name which."
+            exit 1
+          fi
+          if [ "${DO_OUTCOME}" != "success" ]; then
+            echo "::error::Promotion did not succeed (phase '${DO_PHASE}', expected ACTIVE)."
+            echo "Roll back by re-running this workflow with promote_only=true and the last good SHA."
+            exit 1
+          fi
+          echo "Promoted successfully (phase ${DO_PHASE})."
 
       - name: Post final GitHub Deployment status
         if: ${{ always() && steps.gh_deployment.outputs.deployment_id != '' }}
@@ -545,20 +585,46 @@ jobs:
           IMAGE_PRESENT: ${{ steps.verify_image.outputs.present }}
           DO_PHASE: ${{ steps.do_deploy.outputs.phase }}
           DO_URL: ${{ steps.do_deploy.outputs.do_deploy_url }}
+          DO_OUTCOME: ${{ steps.do_deploy.outputs.outcome }}
           APP_URL: ${{ inputs.app_url }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          DEPLOY_SHA: ${{ inputs.deploy_sha }}
+          DOCR_LIVE: ${{ inputs.docr_live }}
+          PROMOTE_ONLY: ${{ inputs.promote_only }}
         run: |
+          set -uo pipefail
+
+          # The arming row reports what HAPPENED, not what was requested. Reading
+          # it off `docr_live` alone would let an armed run that promoted nothing
+          # (blocked at the credential, the image interlock or an unreadable spec)
+          # print "spec patched" — the summary is the artefact people trust when
+          # they do not open the log, so it must never overstate.
+          if [ "${DOCR_LIVE}" = "true" ] && [ "${DO_OUTCOME:-}" = "success" ]; then
+            ARMED_ROW='**YES** — live spec patched to this image'
+          elif [ "${DOCR_LIVE}" = "true" ]; then
+            ARMED_ROW='**YES, but NOTHING was promoted** — the job failed; see the log'
+          else
+            ARMED_ROW='no — INERT, spec untouched'
+          fi
+
+          if [ "${PROMOTE_ONLY}" = "true" ]; then
+            MODE_ROW='promote_only (rollback / re-promote — no rebuild)'
+          else
+            MODE_ROW='build + push + promote'
+          fi
+
           {
-            echo "## ${{ inputs.environment }} — build-once / promote"
+            echo "## ${ENVIRONMENT} — build-once / promote"
             echo ""
             echo "| | |"
             echo "|---|---|"
-            echo "| Commit / tag | \`${{ inputs.deploy_sha }}\` |"
+            echo "| Commit / tag | \`${DEPLOY_SHA}\` |"
             echo "| Image | \`${IMAGE_REF}\` |"
-            echo "| Mode | ${{ inputs.promote_only && 'promote_only (rollback / re-promote — no rebuild)' || 'build + push + promote' }} |"
+            echo "| Mode | ${MODE_ROW} |"
             echo "| Registry credential | ${PUSH_CAPABLE:-false} |"
             echo "| App spec readable | ${APP_READABLE:-false} |"
             echo "| Image present in DOCR | ${IMAGE_PRESENT:-false} |"
-            echo "| Armed (\`docr_live\`) | ${{ inputs.docr_live == 'true' && '**YES** — spec patched' || 'no — INERT, spec untouched' }} |"
+            echo "| Armed (\`docr_live\`) | ${ARMED_ROW} |"
             if [ -n "${DO_PHASE:-}" ]; then
               echo "| DO phase | \`${DO_PHASE}\` |"
             fi
@@ -567,7 +633,7 @@ jobs:
             fi
             echo "| App | ${APP_URL} |"
             echo ""
-            if [ "${{ inputs.docr_live }}" != "true" ]; then
+            if [ "${DOCR_LIVE}" != "true" ]; then
               echo "> Inert run. Arm with \`gh variable set DOCR_DEPLOY_LIVE --body true\`; revert with \`gh variable delete DOCR_DEPLOY_LIVE\`."
             fi
             echo ""

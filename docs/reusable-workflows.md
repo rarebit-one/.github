@@ -809,6 +809,14 @@ before it can touch anything. The interlock that makes every failure path a
 no-op rather than a *partial* action is the "Verify the image tag exists in
 DOCR" step: the spec is never pointed at a tag that is not provably present.
 
+The symmetric rule applies once you arm it: **an armed run that promoted nothing
+fails the job.** The promote step is itself gated on the image interlock and a
+readable spec, so an armed run can otherwise sail past it as `skipped` — build
+fine, push fine, promote nothing — and a gate written only as "did the rollout
+reach ACTIVE" would let that exit green. Unarmed, the same situation is the
+intended inert behaviour. The step summary's arming row reports what *happened*,
+never what was requested, for the same reason.
+
 ### Rollback
 
 ```bash
