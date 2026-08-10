@@ -21,6 +21,7 @@ Then work inside `.worktrees/<name>/` for the rest of the session.
 - `.github/workflows/reusable-gem-release.yml` — trusted-publishing release to RubyGems via OIDC
 - `.github/workflows/reusable-weekly-maintenance.yml` — scheduled `bundle outdated` + bundler-audit
 - `.github/workflows/reusable-track-do-deployment.yml` — DigitalOcean deployment **tracker** (observes a `deploy_on_push` rollout, polls the DO API, probes the public URL, comments on the merged PR). Not a deployer.
+- `.github/workflows/reusable-deploy-docr-staging.yml` — the build-once/promote staging **deployer** (`rarebit-sre#189`): builds the caller's image on a GitHub-hosted **x64** runner, pushes it to DOCR under an immutable per-SHA tag, and patches only the live app spec's image reference. Ships **inert** behind `docr_live`, and degrades to a loud green no-op when the token lacks registry write. `promote_only: true` is the rollback path. The build runner is hardcoded because DO runs amd64 and the mac-mini-1 runners are arm64.
 - `.github/workflows/claude-agent.yml` — issue-triggered Claude PR agent
 - `.github/workflows/claude-code-review.yml` — PR-triggered Claude review bot
 - `.github/workflows/codeql-actions.yml` — CodeQL scanning for the Actions language

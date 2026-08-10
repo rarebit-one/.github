@@ -1,0 +1,641 @@
+name: Reusable — Build to DOCR and promote (staging)
+
+# Build-once / promote staging deploy for the rarebit estate.
+#
+# WHAT IT DOES
+#   1. Builds the caller's Dockerfile at an exact commit SHA, on a GitHub-hosted
+#      x64 runner, and pushes it to DigitalOcean Container Registry tagged with
+#      that SHA.
+#   2. Reads the LIVE App Platform spec and prints, component by component,
+#      exactly which image reference it would set.
+#   3. Only if ARMED, patches the live spec's image reference to that tag and
+#      polls the resulting deployment to a terminal phase.
+#
+# WHY IT EXISTS — rarebit-one/rarebit-sre#189. Today DigitalOcean builds each
+# environment independently from GitHub, so production runs a *different build*
+# from the one staging validated, and no rarebit workflow has a rollback path at
+# all. Building once and promoting an immutable tag fixes both: `promote_only`
+# re-points the app at any previously built tag without a rebuild.
+#
+# ── 🔴 ARCHITECTURE: THE BUILD RUNNER IS PINNED ON PURPOSE ──────────────────
+# `runs-on: ubuntu-latest` below is hardcoded and MUST NOT be indirected through
+# `vars.RUNNER_LABEL` the way the callers' CI jobs are. DigitalOcean App Platform
+# runs **amd64**; the mac-mini-1 self-hosted runners are **arm64**. Routing this
+# build to `macmini1` would push an arm64 image that builds green, pushes green,
+# and then fails at container start inside DO — a failure that surfaces nowhere
+# near its cause. `platforms: linux/amd64` is also set explicitly on the build so
+# the target architecture never depends on the host's.
+#
+# ── SHIPS INERT (.claude/conventions/actuator-arming.md) ────────────────────
+# Patching a live app spec mutates something outside this run, so it is gated:
+#
+#   * `docr_live` must be the string "true" before the spec is touched. Unarmed,
+#     the workflow still builds, still pushes, still fetches the live spec and
+#     still PRINTS the full patch it would apply — it just does not apply it. The
+#     dry run exercises the whole decision rather than returning early, which is
+#     the only kind of dry run worth having.
+#   * The push credential is the second gate. A token that cannot obtain
+#     read-write registry credentials degrades this workflow to a LOUD no-op that
+#     exits 0 — never a crash, never a half-done deploy. Until the operator mints
+#     a registry-capable token this file is a green, informative no-op.
+#   * The spec is never patched to a tag that is not provably present in DOCR
+#     (see "Verify the image tag exists"). That is what makes "no credential" a
+#     no-op rather than a partial action.
+#
+# ── SPEC HANDLING ───────────────────────────────────────────────────────────
+# DigitalOcean does NOT read `.do/app.*.yaml`. The live spec is authoritative, so
+# both the preview and the apply do a live round-trip and change ONLY the image
+# block on each component. Nothing is rewritten from the repo, so console-side
+# config (env vars, sizing, alerts, health checks) is preserved. Note that on
+# read-back `deploy_on_push` appears ABSENT rather than `false` — absent is OFF.
+#
+# ── ROLLBACK ────────────────────────────────────────────────────────────────
+# `promote_only: true` skips build and push entirely and promotes an existing
+# DOCR tag. That is the rollback path: pick the SHA that was last good, dispatch,
+# and the app is re-pointed at the byte-identical image it ran before — no
+# rebuild, no reliance on the DO console, and it cannot be silently overwritten
+# by a later push because the app has no `deploy_on_push` source.
+
+on:
+  workflow_call:
+    inputs:
+      deploy_sha:
+        description: >-
+          Exact commit SHA to build and deploy — the SHA CI validated. Also the
+          image tag. With `promote_only: true` this is the EXISTING tag to
+          promote (i.e. the rollback target).
+        required: true
+        type: string
+      registry:
+        description: "DOCR registry name (the path segment after registry.digitalocean.com/)."
+        required: true
+        type: string
+      image_repo:
+        description: "DOCR repository name within the registry, e.g. fundbright-web."
+        required: true
+        type: string
+      app_url:
+        description: "Ingress URL for the target app, used for the GitHub Deployment link and the summary."
+        required: true
+        type: string
+      environment:
+        description: "GitHub Deployment environment name."
+        required: false
+        type: string
+        default: staging
+      dockerfile:
+        description: "Path to the Dockerfile to build."
+        required: false
+        type: string
+        default: ./Dockerfile
+      context:
+        description: "Docker build context."
+        required: false
+        type: string
+        default: .
+      build_args:
+        description: "Docker build args (multiline KEY=VALUE). NEVER secrets — they are visible in `docker history`."
+        required: false
+        type: string
+        default: ""
+      build_secrets:
+        description: >-
+          BuildKit secrets (multiline KEY=VALUE), mounted only during the build.
+          Reference with `RUN --mount=type=secret,id=KEY …`.
+        required: false
+        type: string
+        default: ""
+      build_secret_id:
+        description: >-
+          Optional BuildKit secret id whose VALUE comes from the BUILD_SECRET_VALUE
+          secret (secrets cannot travel through `with:`). Empty → nothing extra is
+          mounted.
+        required: false
+        type: string
+        default: ""
+      promote_only:
+        description: >-
+          Skip build and push; promote an already-published `deploy_sha` tag.
+          THIS IS THE ROLLBACK PATH. The tag's existence is verified before the
+          spec is touched, so a typo'd SHA fails loudly instead of pointing the
+          app at nothing.
+        required: false
+        type: boolean
+        default: false
+      docr_live:
+        description: >-
+          Arming gate. The live app spec is patched ONLY when this is exactly
+          "true". Callers pass a repo variable (e.g. `vars.DOCR_DEPLOY_LIVE`) so
+          arming and disarming are one reversible `gh variable` command and never
+          a code change.
+        required: false
+        type: string
+        default: ""
+      free_disk_space:
+        description: >-
+          Reclaim ~10 GiB on the runner before building. GitHub-hosted runners
+          have ~14 GiB free vs DigitalOcean's builder's 24 GiB, so a large image
+          can hit ENOSPC here that never appeared on DO. Off by default because
+          it costs ~1 min; turn it on when a build fails on disk.
+        required: false
+        type: boolean
+        default: false
+      poll_timeout_seconds:
+        description: "How long to poll the DO deployment for a terminal phase."
+        required: false
+        type: string
+        default: "1800"
+    secrets:
+      DIGITALOCEAN_ACCESS_TOKEN:
+        description: >-
+          DO PAT for the team that owns BOTH the registry and the app. Needs
+          registry read+write (to push) AND enough App Platform scope to run
+          `apps update` on the target app. See the PR that introduced this file
+          for the exact shape — an app with an attached managed database needs
+          more than app:read + app:update.
+        required: true
+      DO_APP_ID:
+        description: >-
+          App Platform app ID. Passed as a SECRET rather than an input because
+          the `secrets` context is not available in a caller's `jobs.<id>.with`
+          block, and every consumer stores the app ID as a repo secret today.
+        required: true
+      BUILD_SECRET_VALUE:
+        description: "Value for the BuildKit secret named by `build_secret_id`. Unset → nothing extra is mounted."
+        required: false
+
+# Scoped at the job, not here: with one job the two are equivalent in effect, but
+# a workflow-level `deployments: write` would silently widen any job added later.
+permissions: {}
+
+jobs:
+  deploy:
+    name: Build → DOCR → promote (${{ inputs.environment }})
+    permissions:
+      # Checkout of the caller's repo at deploy_sha.
+      contents: read
+      # The GitHub Deployment lifecycle steps (create / in_progress / final
+      # status). A reusable workflow can only NARROW the caller's token, never
+      # widen it — the CALLER must grant `deployments: write` too, or the run
+      # fails at startup with no job and no API error.
+      deployments: write # create + finish the GitHub Deployment record
+    # 🔴 HARDCODED ON PURPOSE — see the ARCHITECTURE note in the header. Do not
+    # replace this with `${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}`: the
+    # self-hosted runners this estate uses are arm64 and DO App Platform is amd64.
+    runs-on: ubuntu-latest
+    # Cold Rails+Node image build on a 2 vCPU runner (~25 min worst case) plus the
+    # 30-minute deploy poll plus setup.
+    timeout-minutes: 75
+
+    env:
+      IMAGE_REF: registry.digitalocean.com/${{ inputs.registry }}/${{ inputs.image_repo }}:${{ inputs.deploy_sha }}
+      CACHE_REF: registry.digitalocean.com/${{ inputs.registry }}/${{ inputs.image_repo }}:buildcache
+
+    steps:
+      # ─────────────────────────────────────────────────────────────────────
+      # 1. Capability preflight — decides no-op vs. proceed, and NEVER crashes.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Preflight — probe the DO credential
+        id: preflight
+        env:
+          DO_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          APP_ID: ${{ secrets.DO_APP_ID }}
+          ARMED: ${{ inputs.docr_live }}
+          PROMOTE_ONLY: ${{ inputs.promote_only }}
+        run: |
+          set -uo pipefail
+          emit() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
+
+          echo "Target image : ${IMAGE_REF}"
+          echo "App          : ${APP_ID:-<unset>}"
+          echo "promote_only : ${PROMOTE_ONLY}"
+          echo "armed        : $([ "${ARMED}" = "true" ] && echo "YES (spec WILL be patched)" || echo "no (inert — spec will NOT be patched)")"
+          echo ""
+
+          if [ -z "${DO_TOKEN}" ] || [ -z "${APP_ID}" ]; then
+            echo "::warning::DIGITALOCEAN_ACCESS_TOKEN and/or DO_APP_ID are not readable from this run — nothing was built, pushed or deployed."
+            echo "This is a deliberate loud no-op, not a failure. Provision the secrets rather than re-running."
+            emit push_capable "false"
+            emit app_readable "false"
+            exit 0
+          fi
+
+          # Probe PUSH capability exactly, without pushing anything: DO hands out
+          # read-write registry docker credentials only to a token that actually
+          # carries registry write. A read-only token gets 401/403 here. This is
+          # why the workflow can be merged before the credential exists — it
+          # discovers it is unarmed instead of failing at `docker push`.
+          RW_CODE=$(curl -s -o /tmp/docr-creds.json -w '%{http_code}' \
+            -H "Authorization: Bearer ${DO_TOKEN}" \
+            "https://api.digitalocean.com/v2/registry/docker-credentials?read_write=true&expiry_seconds=3600" \
+            || echo "000")
+          case "${RW_CODE}" in
+            200)
+              echo "Registry: read-write credentials obtained (push capable)."
+              emit push_capable "true"
+              ;;
+            401|403)
+              echo "::warning::The DO token cannot obtain READ-WRITE registry credentials (HTTP ${RW_CODE}). Nothing was built or pushed."
+              echo "A missing write credential degrades this actuator to a no-op by design (actuator-arming.md)."
+              echo "Operator action: mint a PAT in the SAME DO team as the app with Container Registry read+write,"
+              echo "and set it as the repo-level DIGITALOCEAN_ACCESS_TOKEN. Registry scope is NOT implied by app:update."
+              emit push_capable "false"
+              ;;
+            404)
+              echo "::warning::No container registry exists for this DO team (HTTP 404). Nothing was built or pushed."
+              emit push_capable "false"
+              ;;
+            *)
+              echo "::warning::Unexpected HTTP ${RW_CODE} probing registry credentials — treating as not push-capable and doing nothing."
+              emit push_capable "false"
+              ;;
+          esac
+          rm -f /tmp/docr-creds.json
+
+          APP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${DO_TOKEN}" \
+            "https://api.digitalocean.com/v2/apps/${APP_ID}" || echo "000")
+          if [ "${APP_CODE}" = "200" ]; then
+            echo "App Platform: spec is readable."
+            emit app_readable "true"
+          else
+            echo "::warning::Cannot read app ${APP_ID} (HTTP ${APP_CODE}) — the spec preview and any promotion are skipped."
+            emit app_readable "false"
+          fi
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 2. Build and push (skipped entirely on the rollback path).
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Free disk space
+        if: ${{ steps.preflight.outputs.push_capable == 'true' && !inputs.promote_only && inputs.free_disk_space }}
+        run: |
+          set -uo pipefail
+          echo "Before:"; df -h / | tail -1
+          # Inlined rather than pulled from a third-party action: it is six paths,
+          # and it avoids adding another SHA pin to keep current.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/local/lib/node_modules \
+                      "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
+          echo "After:"; df -h / | tail -1
+
+      - name: Checkout
+        if: ${{ steps.preflight.outputs.push_capable == 'true' && !inputs.promote_only }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Build the exact SHA CI validated, not whatever is at the tip of the
+          # default branch when this run happens to start.
+          ref: ${{ inputs.deploy_sha }}
+          persist-credentials: false
+
+      - name: Log in to DOCR
+        id: docr_login
+        if: ${{ steps.preflight.outputs.push_capable == 'true' }}
+        env:
+          DO_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+        run: |
+          set -uo pipefail
+          # Equivalent to `doctl registry login`, but without installing doctl for
+          # a single API call — and it reuses the same endpoint the preflight
+          # already proved works, so login cannot fail for a reason preflight
+          # would have caught.
+          #
+          # Deliberate simplification: `promote_only` never pushes, so read-only
+          # registry credentials would technically suffice for it. Both paths ask
+          # for read-write anyway, because the credential shape this pipeline is
+          # provisioned with is a single push-capable token (see the docs), and a
+          # second read-only code path would be untested weight for no gain. If a
+          # read-only rollback ever matters, split the probe — do not weaken it.
+          curl -sf -H "Authorization: Bearer ${DO_TOKEN}" \
+            "https://api.digitalocean.com/v2/registry/docker-credentials?read_write=true&expiry_seconds=7200" \
+            -o /tmp/docr-config.json
+          mkdir -p "${HOME}/.docker"
+          install -m 600 /tmp/docr-config.json "${HOME}/.docker/config.json"
+          rm -f /tmp/docr-config.json
+          # Never print the file. Confirm shape only.
+          jq -r '.auths | keys[]' "${HOME}/.docker/config.json"
+
+      - name: Set up Docker Buildx
+        if: ${{ steps.preflight.outputs.push_capable == 'true' && !inputs.promote_only }}
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build and push image
+        id: build_push
+        if: ${{ steps.preflight.outputs.push_capable == 'true' && !inputs.promote_only }}
+        # continue-on-error so a transient DOCR push flake gets one retry below.
+        # A genuine build failure still fails the job, at the retry step.
+        continue-on-error: true
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          # 🔴 Explicit, never inherited from the host. See the header.
+          platforms: linux/amd64
+          # No provenance/SBOM attestations: they turn the push into an OCI index
+          # with extra manifests, which is both more objects in the registry and a
+          # shape App Platform has no use for. One tag, one manifest.
+          provenance: false
+          sbom: false
+          build-args: ${{ inputs.build_args }}
+          secrets: |
+            ${{ inputs.build_secrets }}
+            ${{ inputs.build_secret_id != '' && format('{0}={1}', inputs.build_secret_id, secrets.BUILD_SECRET_VALUE) || '' }}
+          # ONE immutable tag per build: the commit SHA. Nothing moving, nothing
+          # "latest". An immutable tag is what makes a rollback target
+          # unambiguous, and the live spec's `image.tag` is then a truthful record
+          # of what is running.
+          tags: ${{ env.IMAGE_REF }}
+          # `mode=max` deliberately. This Dockerfile family is multi-stage and
+          # every expensive layer (bundle install, npm ci, assets:precompile)
+          # lives in a stage that is DISCARDED from the final image — `mode=min`
+          # would export none of them and leave a 2 vCPU runner rebuilding the
+          # whole thing every push. The cost is that superseded cache manifests
+          # orphan blobs in the registry; those are reclaimed by DOCR garbage
+          # collection, not by deleting tags. See the PR body.
+          cache-from: type=registry,ref=${{ env.CACHE_REF }}
+          cache-to: type=registry,ref=${{ env.CACHE_REF }},mode=max
+
+      - name: Build and push image (one retry)
+        id: build_push_retry
+        if: ${{ steps.build_push.outcome == 'failure' }}
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+          build-args: ${{ inputs.build_args }}
+          secrets: |
+            ${{ inputs.build_secrets }}
+            ${{ inputs.build_secret_id != '' && format('{0}={1}', inputs.build_secret_id, secrets.BUILD_SECRET_VALUE) || '' }}
+          tags: ${{ env.IMAGE_REF }}
+          cache-from: type=registry,ref=${{ env.CACHE_REF }}
+          cache-to: type=registry,ref=${{ env.CACHE_REF }},mode=max
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 3. The safety interlock. Nothing below may point the app at a tag that
+      #    is not provably in the registry — that is what keeps every failure
+      #    path a no-op rather than a partial action.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Verify the image tag exists in DOCR
+        id: verify_image
+        if: ${{ steps.preflight.outputs.push_capable == 'true' }}
+        env:
+          PROMOTE_ONLY: ${{ inputs.promote_only }}
+        run: |
+          set -uo pipefail
+          if docker buildx imagetools inspect "${IMAGE_REF}" > /tmp/manifest.txt 2>&1; then
+            echo "Image present in DOCR:"
+            sed -n '1,12p' /tmp/manifest.txt
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::${IMAGE_REF} is NOT present in DOCR — nothing will be promoted."
+            if [ "${PROMOTE_ONLY}" = "true" ]; then
+              echo "::error::promote_only was requested for a tag that does not exist. Check the SHA; no rollback was performed."
+              echo "present=false" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+            sed -n '1,20p' /tmp/manifest.txt
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 4. Compute and PRINT the promotion, armed or not. A dry run that returns
+      #    before working out what it would mutate proves only that the workflow
+      #    starts (actuator-arming.md).
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Install doctl
+        id: doctl
+        if: ${{ steps.preflight.outputs.app_readable == 'true' }}
+        # continue-on-error: `doctl auth init` validates the token against
+        # /v2/account, which a narrowly-scoped PAT may be denied. That must
+        # degrade this workflow to a no-op, not crash it — downstream steps gate
+        # on this step's outcome.
+        continue-on-error: true
+        uses: digitalocean/action-doctl@3cb3953159719656269e044e0e24ca16dd2a690f # v2.5.2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Preview the spec patch
+        id: preview
+        if: ${{ steps.preflight.outputs.app_readable == 'true' && steps.doctl.outcome == 'success' }}
+        env:
+          APP_ID: ${{ secrets.DO_APP_ID }}
+          IMAGE_REPO: ${{ inputs.image_repo }}
+          DEPLOY_SHA: ${{ inputs.deploy_sha }}
+        run: |
+          set -uo pipefail
+          if ! doctl apps spec get "$APP_ID" --format json > /tmp/live-spec.json 2>/tmp/spec-err; then
+            echo "::warning::Could not read the live spec: $(cat /tmp/spec-err 2>/dev/null)"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # READ-ONLY inspection. It deliberately does NOT re-implement the patch
+          # expression that do-app-deploy applies — a second copy of that logic
+          # could drift and produce a confident, wrong preview. It reports the
+          # current source of each component and the single reference every one of
+          # them would be set to.
+          echo "Live spec for ${APP_ID} — current component sources:"
+          jq -r '
+            [(.services // [])[], (.workers // [])[], (.jobs // [])[]]
+            | .[]
+            | "  - " + .name
+              + "  source=" + (
+                  if .image
+                  then ((.image.registry_type // "?") + "/" + (.image.repository // "?") + ":" + (.image.tag // "?"))
+                  else ((.github.repo // "?") + "@" + (.github.branch // "?") + " dockerfile=" + (.dockerfile_path // "?"))
+                  end
+                )
+              + "  deploy_on_push=" + ((.github.deploy_on_push // false) | tostring)
+          ' /tmp/live-spec.json || true
+          echo ""
+
+          # A DOCR-sourced component has no git source, so DigitalOcean's
+          # `${_self.COMMIT_HASH}` binding has nothing to resolve against. Any app
+          # that still uses it must move the value to a build arg baked into the
+          # image before this path is armed, or the first live promotion trips on
+          # spec validation. Surfacing it here is the whole point of previewing.
+          if grep -q '_self.COMMIT_HASH' /tmp/live-spec.json; then
+            echo "::warning::The live spec references \${_self.COMMIT_HASH}. That binding comes from the GitHub source this promotion removes."
+            echo "Before arming: drop or hardcode that env var on the live app, and pass the SHA through \`build_args\` instead (the image bakes it in)."
+          fi
+
+          echo "Every component above WOULD be repointed to:"
+          echo "    registry_type: DOCR"
+          echo "    repository:    ${IMAGE_REPO}"
+          echo "    tag:           ${DEPLOY_SHA}"
+          echo "(i.e. ${IMAGE_REF})"
+          echo "Nothing else in the spec is touched — env vars, sizing, alerts and"
+          echo "health checks are read from live and written back unchanged."
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: INERT — stopping before the mutation
+        if: ${{ inputs.docr_live != 'true' }}
+        run: |
+          echo "::notice::INERT. docr_live is not 'true', so the live app spec was NOT patched."
+          echo "Everything above — build, push, and the exact promotion that would follow — really happened or was really computed."
+          echo ""
+          echo "Arm:    gh variable set    DOCR_DEPLOY_LIVE --body true"
+          echo "Revert: gh variable delete DOCR_DEPLOY_LIVE"
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 5. The mutation. Every guard must hold.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Create GitHub Deployment
+        id: gh_deployment
+        if: >-
+          ${{ inputs.docr_live == 'true'
+              && steps.verify_image.outputs.present == 'true'
+              && steps.preview.outputs.ok == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          SHA: ${{ inputs.deploy_sha }}
+        run: |
+          set -uo pipefail
+          # `--input -` with real JSON: `required_contexts` must be an ARRAY, which
+          # neither -f (string) nor -F (scalar) can express.
+          ID=$(jq -n \
+                --arg ref "${SHA}" \
+                --arg env "${ENVIRONMENT}" \
+                --arg desc "DOCR promote of ${SHA}" \
+                '{ref: $ref, environment: $env, description: $desc, auto_merge: false, required_contexts: [], transient_environment: false, production_environment: false}' \
+              | gh api "repos/${GITHUB_REPOSITORY}/deployments" --method POST --input - --jq '.id' 2>/dev/null || echo "")
+          echo "deployment_id=${ID}" >> "$GITHUB_OUTPUT"
+          if [ -n "${ID}" ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/deployments/${ID}/statuses" \
+              -f state=in_progress -f environment="${ENVIRONMENT}" >/dev/null || true
+          else
+            echo "::warning::Could not create a GitHub Deployment record — continuing; this is bookkeeping, not the deploy."
+          fi
+
+      - name: Patch the live spec and roll out
+        id: do_deploy
+        if: >-
+          ${{ inputs.docr_live == 'true'
+              && steps.verify_image.outputs.present == 'true'
+              && steps.preview.outputs.ok == 'true' }}
+        # Referenced by absolute repo path, and SHA-pinned: a nested `uses: …@main`
+        # would float regardless of the ref a caller pinned THIS file to, and `./`
+        # resolves against the CALLER's checkout inside a reusable workflow.
+        # This composite never exits non-zero — it reports via outputs, and the
+        # gate step below is what fails the job.
+        uses: rarebit-one/.github/.github/actions/do-app-deploy@60a8beebb401ded077c37a742420c66b74aabf9f
+        with:
+          app_id: ${{ secrets.DO_APP_ID }}
+          image_repo: ${{ inputs.image_repo }}
+          deploy_sha: ${{ inputs.deploy_sha }}
+          poll_timeout_seconds: ${{ inputs.poll_timeout_seconds }}
+
+      - name: Gate — an ARMED run must actually have promoted something
+        if: ${{ inputs.docr_live == 'true' }}
+        env:
+          DEPLOY_STEP_OUTCOME: ${{ steps.do_deploy.outcome }}
+          DO_OUTCOME: ${{ steps.do_deploy.outputs.outcome }}
+          DO_PHASE: ${{ steps.do_deploy.outputs.phase }}
+        run: |
+          set -uo pipefail
+          # Named for the failure it exists to catch, which is NOT "the rollout
+          # errored". `do_deploy` is itself gated on the image interlock and a
+          # readable spec, so an armed run can sail straight past it as SKIPPED —
+          # build fine, push fine, promote nothing — and a gate written only as
+          # `outputs.outcome != 'success'` would have let that exit green while
+          # the summary claimed the spec was patched.
+          #
+          # An armed actuator that mutated nothing is a FAILURE, not a no-op: the
+          # operator asked for a deploy and did not get one. (Unarmed, the same
+          # situation is the intended inert behaviour and this step never runs.)
+          if [ "${DEPLOY_STEP_OUTCOME}" = "skipped" ]; then
+            echo "::error::ARMED, but nothing was promoted — the run never reached the spec patch."
+            echo "The blocking guard is one of: no read-write registry credential, the image tag is not present in DOCR, or the live spec could not be read. The warnings above name which."
+            exit 1
+          fi
+          if [ "${DO_OUTCOME}" != "success" ]; then
+            echo "::error::Promotion did not succeed (phase '${DO_PHASE}', expected ACTIVE)."
+            echo "Roll back by re-running this workflow with promote_only=true and the last good SHA."
+            exit 1
+          fi
+          echo "Promoted successfully (phase ${DO_PHASE})."
+
+      - name: Post final GitHub Deployment status
+        if: ${{ always() && steps.gh_deployment.outputs.deployment_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          DEPLOYMENT_ID: ${{ steps.gh_deployment.outputs.deployment_id }}
+          APP_URL: ${{ inputs.app_url }}
+          STATE: ${{ steps.do_deploy.outputs.outcome == 'success' && 'success' || 'failure' }}
+        run: |
+          set -uo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/deployments/${DEPLOYMENT_ID}/statuses" \
+            -f state="${STATE}" -f environment="${ENVIRONMENT}" \
+            -f environment_url="${APP_URL}" \
+            -f log_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            >/dev/null || echo "::warning::Could not post the final deployment status."
+
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Summary
+        if: ${{ always() }}
+        env:
+          PUSH_CAPABLE: ${{ steps.preflight.outputs.push_capable }}
+          APP_READABLE: ${{ steps.preflight.outputs.app_readable }}
+          IMAGE_PRESENT: ${{ steps.verify_image.outputs.present }}
+          DO_PHASE: ${{ steps.do_deploy.outputs.phase }}
+          DO_URL: ${{ steps.do_deploy.outputs.do_deploy_url }}
+          DO_OUTCOME: ${{ steps.do_deploy.outputs.outcome }}
+          APP_URL: ${{ inputs.app_url }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          DEPLOY_SHA: ${{ inputs.deploy_sha }}
+          DOCR_LIVE: ${{ inputs.docr_live }}
+          PROMOTE_ONLY: ${{ inputs.promote_only }}
+        run: |
+          set -uo pipefail
+
+          # The arming row reports what HAPPENED, not what was requested. Reading
+          # it off `docr_live` alone would let an armed run that promoted nothing
+          # (blocked at the credential, the image interlock or an unreadable spec)
+          # print "spec patched" — the summary is the artefact people trust when
+          # they do not open the log, so it must never overstate.
+          if [ "${DOCR_LIVE}" = "true" ] && [ "${DO_OUTCOME:-}" = "success" ]; then
+            ARMED_ROW='**YES** — live spec patched to this image'
+          elif [ "${DOCR_LIVE}" = "true" ]; then
+            ARMED_ROW='**YES, but NOTHING was promoted** — the job failed; see the log'
+          else
+            ARMED_ROW='no — INERT, spec untouched'
+          fi
+
+          if [ "${PROMOTE_ONLY}" = "true" ]; then
+            MODE_ROW='promote_only (rollback / re-promote — no rebuild)'
+          else
+            MODE_ROW='build + push + promote'
+          fi
+
+          {
+            echo "## ${ENVIRONMENT} — build-once / promote"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Commit / tag | \`${DEPLOY_SHA}\` |"
+            echo "| Image | \`${IMAGE_REF}\` |"
+            echo "| Mode | ${MODE_ROW} |"
+            echo "| Registry credential | ${PUSH_CAPABLE:-false} |"
+            echo "| App spec readable | ${APP_READABLE:-false} |"
+            echo "| Image present in DOCR | ${IMAGE_PRESENT:-false} |"
+            echo "| Armed (\`docr_live\`) | ${ARMED_ROW} |"
+            if [ -n "${DO_PHASE:-}" ]; then
+              echo "| DO phase | \`${DO_PHASE}\` |"
+            fi
+            if [ -n "${DO_URL:-}" ]; then
+              echo "| DO deployment | ${DO_URL} |"
+            fi
+            echo "| App | ${APP_URL} |"
+            echo ""
+            if [ "${DOCR_LIVE}" != "true" ]; then
+              echo "> Inert run. Arm with \`gh variable set DOCR_DEPLOY_LIVE --body true\`; revert with \`gh variable delete DOCR_DEPLOY_LIVE\`."
+            fi
+            echo ""
+            echo "**Rollback:** re-run this workflow with \`promote_only: true\` and the last good SHA."
+          } >> "$GITHUB_STEP_SUMMARY"
