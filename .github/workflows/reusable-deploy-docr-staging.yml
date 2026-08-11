@@ -26,6 +26,31 @@ name: Reusable — Build to DOCR and promote (staging)
 # near its cause. `platforms: linux/amd64` is also set explicitly on the build so
 # the target architecture never depends on the host's.
 #
+# 🔴 ── PRECONDITION BEFORE YOU SET deploy_on_push:false ON ANY APP ──────────
+# MEASURED THE HARD WAY on fundbright-web, 2026-08-10 (fundbright/dev-ops#213).
+#
+# Turning `deploy_on_push` off makes a CI-gated workflow the ONLY path to the
+# environment. That is the point — but it means **every merge that does not
+# trigger CI silently never deploys.** No error, no red check; the commit just
+# never appears. Staging was found two commits behind main with everything green.
+#
+# The specific trap: **a merge performed with `GITHUB_TOKEN` does not trigger any
+# workflow** (GitHub's recursion prevention). So a dependabot PR auto-merged by
+# the `github-actions` app lands on main, CI never runs on main for that SHA, and
+# this workflow — which triggers on `workflow_run` of CI — never fires. Verified:
+# `gh run list --workflow CI --branch main` had NO run for either affected SHA,
+# and both showed `mergedBy: app/github-actions`. That was ~7% of the last 30
+# merges, and the share grows as auto-merge is relied on more.
+#
+# Before flipping `deploy_on_push` to false on the next app, enumerate EVERY way
+# a commit reaches its deploy branch and confirm each one triggers CI:
+#   gh pr list --state merged --limit 30 --json mergedBy \
+#     --jq '[.[]|.mergedBy.login]|group_by(.)|map({by:.[0],n:length})'
+# Any actor that is a GitHub App — `app/github-actions` above all — is a merge
+# path this workflow cannot see. Fix that first, or accept silent staleness and
+# add a drift check that compares the deploy branch's HEAD to the live spec's
+# image tag. Do not assume "CI runs on main" just because `on: push` says so.
+#
 # ── SHIPS INERT (.claude/conventions/actuator-arming.md) ────────────────────
 # Patching a live app spec mutates something outside this run, so it is gated:
 #
