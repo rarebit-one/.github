@@ -26,6 +26,12 @@ name: Reusable — Build to DOCR and promote (staging)
 # near its cause. `platforms: linux/amd64` is also set explicitly on the build so
 # the target architecture never depends on the host's.
 #
+# NB this note is about **mac-mini-1** and stays accurate. It is NOT the whole
+# reason the build job is pinned — hyperion is x86_64, so architecture alone no
+# longer vetoes self-hosting. The standing reason is credential blast radius; it
+# is written out at the `runs-on:` line itself, which is where someone about to
+# indirect it will be looking.
+#
 # 🔴 ── PRECONDITION BEFORE YOU SET deploy_on_push:false ON ANY APP ──────────
 # MEASURED THE HARD WAY on fundbright-web, 2026-08-10 (fundbright/dev-ops#213).
 #
@@ -204,9 +210,28 @@ jobs:
       # widen it — the CALLER must grant `deployments: write` too, or the run
       # fails at startup with no job and no API error.
       deployments: write # create + finish the GitHub Deployment record
-    # 🔴 HARDCODED ON PURPOSE — see the ARCHITECTURE note in the header. Do not
-    # replace this with `${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}`: the
-    # self-hosted runners this estate uses are arm64 and DO App Platform is amd64.
+    # 🔴 HARDCODED ON PURPOSE — but NOT for the reason this comment used to give.
+    # Do not replace this with `${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}`.
+    #
+    # The old reason ("the self-hosted runners this estate uses are arm64") is
+    # FALSE as of hyperion (Intel i5-13500T, x86_64), and it was always the weaker
+    # argument anyway: `platforms: linux/amd64` is pinned on the build, so the
+    # output architecture never depended on the host. Left standing, that reason
+    # invites exactly the wrong inference — "hyperion is amd64, so the veto is
+    # void" — and routes this job onto a shared persistent host.
+    #
+    # The REAL and durable reason is credential blast radius. This job consumes
+    # `DIGITALOCEAN_ACCESS_TOKEN`, a DO PAT carrying registry read+write AND App
+    # Platform scope, and uses it to MINT one-hour read-write registry docker
+    # credentials (see the `read_write=true` call below). Under the blast-radius
+    # ruling of 2026-08-14, a credential whose compromise grants more than the
+    # job's own read access stays GitHub-hosted — and a credential-*minting* key
+    # is the clearest case of it. On an ephemeral hosted runner that key dies with
+    # the job; on a persistent self-hosted one it is a durable escalation path to
+    # the registry and to App Platform.
+    #
+    # Architecture is still a real constraint for mac-mini-1 specifically (arm64);
+    # see the ARCHITECTURE note in the header, which remains accurate as written.
     runs-on: ubuntu-latest
     # Cold Rails+Node image build on a 2 vCPU runner (~25 min worst case) plus the
     # 30-minute deploy poll plus setup.
