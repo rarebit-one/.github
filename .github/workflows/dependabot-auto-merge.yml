@@ -98,6 +98,16 @@ name: Auto-lander (Dependabot + autonomous engine + maintainer PRs)
 
 on:
   workflow_call:
+    inputs:
+      runner-label:
+        description: >-
+          Label of the runner to execute on. Defaults to ubuntu-latest, which is
+          REQUIRED for public callers: the estate's self-hosted runner groups
+          carry `allows_public_repositories: false`, so a public repo pointed at
+          one has its job refused and it queues forever with nothing red. Private
+          callers pass their homelab label (e.g. `hyperion`).
+        type: string
+        default: 'ubuntu-latest'
 
 jobs:
   auto-merge:
@@ -147,7 +157,7 @@ jobs:
       (github.actor == 'jaryl' &&
         github.event.pull_request.user.login == 'jaryl' &&
         github.event.pull_request.draft == false)
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner-label }}
     timeout-minutes: 10
     permissions:
       contents: write
