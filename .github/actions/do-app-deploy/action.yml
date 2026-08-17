@@ -352,6 +352,30 @@ runs:
           PHASE=$(doctl apps get-deployment "$APP_ID" "$DEPLOY_ID" \
             --format Phase --no-header 2>/dev/null | tr -d '[:space:]' || echo "UNKNOWN")
           PHASE="${PHASE:-UNKNOWN}"
+
+          # Second read path for anything the templated read couldn't produce.
+          #
+          # `--format Phase` renders an UNSET field as Go's `<nil>` and still
+          # exits 0, so the `|| echo "UNKNOWN"` above — which only fires on a
+          # NON-ZERO exit — never sees it. Observed on fundbright-web run
+          # 31450984107 (2026-08-11): `<nil>` for the full 1800s on a promotion
+          # that had in fact SUCCEEDED (`doctl apps get-deployment` later
+          # reported that same deployment as real and completed), producing a
+          # false red on a healthy deploy plus 30 minutes of wasted runner time.
+          #
+          # The JSON representation carries the phase under a different code
+          # path, so retry there before concluding anything. fundbright pins
+          # this action by SHA and ate the false red;
+          # fundbright/delivery-ops#520 has the full incident.
+          case "$PHASE" in
+            PENDING_BUILD|BUILDING|PENDING_DEPLOY|DEPLOYING|ACTIVE|ERROR|CANCELED|SUPERSEDED) ;;
+            *)
+              PHASE=$(doctl apps get-deployment "$APP_ID" "$DEPLOY_ID" \
+                -o json 2>/dev/null | jq -r '.[0].phase // empty' | tr -d '[:space:]' || true)
+              PHASE="${PHASE:-UNKNOWN}"
+              ;;
+          esac
+
           case "$PHASE" in
             ACTIVE)
               TIMED_OUT=0
@@ -361,17 +385,33 @@ runs:
               TIMED_OUT=0
               break
               ;;
-            UNKNOWN)
-              UNKNOWN_COUNT=$(( UNKNOWN_COUNT + 1 ))
-              if [ "$UNKNOWN_COUNT" -ge 6 ]; then
-                echo "::warning::get-deployment returned UNKNOWN 6 polls in a row — DO API may be unreachable"
-                UNKNOWN_COUNT=0
-              fi
+            PENDING_BUILD|BUILDING|PENDING_DEPLOY|DEPLOYING)
+              # Still in flight. Listed EXPLICITLY rather than left to the
+              # catch-all, which is the whole point of this change — see below.
+              UNKNOWN_COUNT=0
               sleep "$POLL_INTERVAL"
               ;;
             *)
-              # Still in flight (PENDING_BUILD / BUILDING / PENDING_DEPLOY / DEPLOYING).
-              UNKNOWN_COUNT=0
+              # Anything that is not a phase DO documents, including a `<nil>`
+              # that survived the JSON retry above.
+              #
+              # This being the CATCH-ALL is the fix. Previously the in-flight
+              # arm was the catch-all, so an unrecognised value landed there and
+              # RESET `UNKNOWN_COUNT` on every poll — the "DO API may be
+              # unreachable" guard below could therefore never trip, and the
+              # loop span silently to the deadline with nothing in the log
+              # explaining why. The guard existed; `<nil>` simply routed around
+              # it.
+              #
+              # A phase DO adds in future also lands here. That degrades to a
+              # warning plus continued polling, never to a wrong outcome: the
+              # loop still exits only on a terminal phase or the deadline,
+              # exactly as before.
+              UNKNOWN_COUNT=$(( UNKNOWN_COUNT + 1 ))
+              if [ "$UNKNOWN_COUNT" -ge 6 ]; then
+                echo "::warning::get-deployment returned an unusable phase 6 polls in a row (last seen: '${PHASE}') — DO API may be unreachable"
+                UNKNOWN_COUNT=0
+              fi
               sleep "$POLL_INTERVAL"
               ;;
           esac
