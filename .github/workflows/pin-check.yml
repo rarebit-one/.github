@@ -221,7 +221,6 @@ jobs:
           # `install` to ${RUNNER_TEMP}/pinact would be source-and-destination
           # identical and fail.
           chmod 0755 pinact
-          echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
           ./pinact --version
 
           cat > /tmp/pinact.yaml <<EOF
@@ -240,7 +239,13 @@ jobs:
           EOF
 
           cd "$GITHUB_WORKSPACE"
-          pinact run --check -c /tmp/pinact.yaml
+          # Invoked by PATH-independent path. $GITHUB_PATH would NOT help here:
+          # it only affects SUBSEQUENT steps, never the one that writes it, and
+          # this invocation is in the same step as the download. Adding the
+          # directory to GITHUB_PATH and then calling `pinact` bare exits 127 --
+          # which is precisely the class of bug this whole change set is fixing,
+          # committed once more while fixing it.
+          "${RUNNER_TEMP}/pinact" run --check -c /tmp/pinact.yaml
 
       # Third, independent check: pin INTEGRITY. zizmor and pinact both only prove
       # a ref is SHAPED like a commit SHA -- neither resolves it. A well-formed pin
