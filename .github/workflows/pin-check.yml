@@ -126,7 +126,16 @@ jobs:
         if: steps.prep.outputs.paths != ''
         env:
           ZIZMOR_VERSION: ${{ inputs.zizmor-version }}
-        run: pipx install "zizmor==${ZIZMOR_VERSION}"
+        run: |
+          pipx install "zizmor==${ZIZMOR_VERSION}"
+          # pipx installs into ~/.local/bin, which a GitHub-hosted image already
+          # has on PATH and a self-hosted account generally does not. Without
+          # this the install step SUCCEEDS and the very next step dies with
+          # `zizmor: command not found` -- and because that step pipes zizmor's
+          # JSON into python, the visible failure is a JSONDecodeError on empty
+          # input, which reads like a zizmor bug rather than a missing binary.
+          # Measured on hyperion, where the gate failed exactly that way.
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
 
       - name: zizmor — full audit (informational, non-blocking)
         if: steps.prep.outputs.paths != ''
