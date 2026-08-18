@@ -190,12 +190,38 @@ jobs:
         run: |
           set -euo pipefail
           cd "${RUNNER_TEMP}"
+          # The checksum below is for ONE architecture, so a mismatch must fail
+          # rather than silently fetch a binary the checksum cannot match. Every
+          # self-hosted Linux runner in this estate is x86_64 today; mac-mini-1's
+          # runner container is arm64 and would land here if a caller ever routed
+          # this gate to it.
+          case "$(uname -m)" in
+            x86_64)  PINACT_ARCH=amd64 ;;
+            aarch64) echo "::error::pinact pin is checksummed for linux_amd64 only; this runner is arm64. Add an arm64 checksum before routing the pinning gate here."; exit 1 ;;
+            *)       echo "::error::unsupported architecture $(uname -m) for the pinact download"; exit 1 ;;
+          esac
           curl -fsSL -o pinact.tar.gz \
-            "https://github.com/suzuki-shunsuke/pinact/releases/download/v${PINACT_VERSION}/pinact_linux_amd64.tar.gz"
+            "https://github.com/suzuki-shunsuke/pinact/releases/download/v${PINACT_VERSION}/pinact_linux_${PINACT_ARCH}.tar.gz"
           echo "${PINACT_SHA256}  pinact.tar.gz" | sha256sum -c -
           tar -xzf pinact.tar.gz pinact
-          install -m 0755 pinact /usr/local/bin/pinact
-          pinact --version
+          # Installed into RUNNER_TEMP, not /usr/local/bin. A GitHub-hosted
+          # runner owns /usr/local/bin; a self-hosted account does not, and the
+          # step dies with `install: cannot create regular file
+          # '/usr/local/bin/pinact': Permission denied` (exit 14). Measured on
+          # hyperion, whose runner accounts are password-locked with no sudo by
+          # design -- so this is not a host to be "fixed", it is the shape a
+          # portable step has to have.
+          #
+          # RUNNER_TEMP is per-job and cleaned by the runner, so this also stops
+          # the gate leaving a binary behind on a long-lived host, where /usr/
+          # local/bin would persist an unpinned-by-anything executable between
+          # unrelated repositories' jobs.
+          # Already cd'd into RUNNER_TEMP above, and tar extracted `pinact`
+          # here, so the binary is in place -- it only needs the mode. An
+          # `install` to ${RUNNER_TEMP}/pinact would be source-and-destination
+          # identical and fail.
+          chmod 0755 pinact
+          ./pinact --version
 
           cat > /tmp/pinact.yaml <<EOF
           version: 3
@@ -213,7 +239,13 @@ jobs:
           EOF
 
           cd "$GITHUB_WORKSPACE"
-          pinact run --check -c /tmp/pinact.yaml
+          # Invoked by PATH-independent path. $GITHUB_PATH would NOT help here:
+          # it only affects SUBSEQUENT steps, never the one that writes it, and
+          # this invocation is in the same step as the download. Adding the
+          # directory to GITHUB_PATH and then calling `pinact` bare exits 127 --
+          # which is precisely the class of bug this whole change set is fixing,
+          # committed once more while fixing it.
+          "${RUNNER_TEMP}/pinact" run --check -c /tmp/pinact.yaml
 
       # Third, independent check: pin INTEGRITY. zizmor and pinact both only prove
       # a ref is SHAPED like a commit SHA -- neither resolves it. A well-formed pin
