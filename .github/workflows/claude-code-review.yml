@@ -18,6 +18,23 @@ env:
   # workflows. Override org-wide via the CLAUDE_MODEL Actions variable; the
   # literal is a safe fallback so an unset var can't yield an empty --model.
   CLAUDE_MODEL: "${{ vars.CLAUDE_MODEL || 'claude-opus-4-8' }}"
+  # Hoisted so the retry attempts below cannot drift apart. GitHub Actions has
+  # no YAML anchors, so the alternative is three copies of this block.
+  REVIEW_PROMPT: |
+    REPO: ${{ github.repository }}
+    PR NUMBER: ${{ github.event.pull_request.number }}
+
+    Please review this pull request and provide feedback on:
+    - Code quality and best practices
+    - Potential bugs or issues
+    - Performance considerations
+    - Security concerns
+    - Test coverage
+
+    Use the repository's CLAUDE.md for guidance on style and conventions.
+    Be constructive and helpful in your feedback.
+
+    Use `gh pr comment` with your Bash tool to leave your review as a comment on the PR.
 
 jobs:
   claude_review:
@@ -55,31 +72,81 @@ jobs:
         with:
           fetch-depth: 1
 
+      # ── Transient-failure retry (rarebit-sre#167) ───────────────────────────
+      #
+      # claude-code-action intermittently returns `is_error:true` on the FIRST
+      # turn with `total_cost_usd: 0` and a sub-second duration — an upstream
+      # capacity rejection, not a bad credential and not a review verdict. With
+      # no retry, one such blip permanently reds the check.
+      #
+      # Measured 2026-08-21: four consecutive PRs failed this way between 15:34
+      # and 15:56 UTC; re-running one unchanged at 16:05 passed with
+      # `is_error:false`, 13 turns and $0.497 spent. Same commit, same secret.
+      #
+      # A failed attempt costs ~700ms and $0, so retrying is close to free.
+      #
+      # 🔴 SCOPE: this absorbs SHORT blips, not a long outage. The backoffs
+      # below span ~6 minutes; the 2026-08-21 window was ~30 minutes wide, so
+      # this alone would NOT have saved every PR that day. Read that before
+      # making this check `required` anywhere (rarebit-sre#201) — gating on it
+      # without a much longer wait converts an upstream blip into a hard block
+      # across every auto-landing repo.
       - name: Run Claude Code Review
+        id: review_1
         if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]'
+        continue-on-error: true
         uses: anthropics/claude-code-action@e63208cb983318a44e3f945e959ef894b707dcfa # v1.0.192
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
           allowed_bots: '*'
-          prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
+          prompt: ${{ env.REVIEW_PROMPT }}
+          # Read/Glob/Grep let the reviewer inspect the checked-out source (type
+          # defs, tests, the CLAUDE.md the prompt references) instead of
+          # reasoning from `gh pr diff` alone. Deliberately read-only — no Edit
+          # or mutating Bash — so the workflow stays fork-safe and resistant to
+          # prompt injection from untrusted PR content.
+          claude_args: '--model ${{ env.CLAUDE_MODEL }} --allowed-tools "Read,Glob,Grep,Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)" --effort high'
 
-            Please review this pull request and provide feedback on:
-            - Code quality and best practices
-            - Potential bugs or issues
-            - Performance considerations
-            - Security concerns
-            - Test coverage
+      - name: Back off before first retry
+        if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.review_1.outcome == 'failure'
+        run: sleep 60
 
-            Use the repository's CLAUDE.md for guidance on style and conventions.
-            Be constructive and helpful in your feedback.
+      - name: Run Claude Code Review (retry 1)
+        id: review_2
+        if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.review_1.outcome == 'failure'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@e63208cb983318a44e3f945e959ef894b707dcfa # v1.0.192
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          track_progress: true
+          allowed_bots: '*'
+          prompt: ${{ env.REVIEW_PROMPT }}
+          # Read/Glob/Grep let the reviewer inspect the checked-out source (type
+          # defs, tests, the CLAUDE.md the prompt references) instead of
+          # reasoning from `gh pr diff` alone. Deliberately read-only — no Edit
+          # or mutating Bash — so the workflow stays fork-safe and resistant to
+          # prompt injection from untrusted PR content.
+          claude_args: '--model ${{ env.CLAUDE_MODEL }} --allowed-tools "Read,Glob,Grep,Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)" --effort high'
 
-            Use `gh pr comment` with your Bash tool to leave your review as a comment on the PR.
+      - name: Back off before final retry
+        if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.review_1.outcome == 'failure' && steps.review_2.outcome == 'failure'
+        run: sleep 300
 
-          # Read/Glob/Grep let the reviewer inspect the checked-out source
-          # (type defs, tests, the CLAUDE.md the prompt references) instead of
+      # Deliberately NOT continue-on-error: the last attempt is allowed to fail
+      # the job, so a genuine error still reds the check instead of passing
+      # silently.
+      - name: Run Claude Code Review (retry 2)
+        id: review_3
+        if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.review_1.outcome == 'failure' && steps.review_2.outcome == 'failure'
+        uses: anthropics/claude-code-action@e63208cb983318a44e3f945e959ef894b707dcfa # v1.0.192
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          track_progress: true
+          allowed_bots: '*'
+          prompt: ${{ env.REVIEW_PROMPT }}
+          # Read/Glob/Grep let the reviewer inspect the checked-out source (type
+          # defs, tests, the CLAUDE.md the prompt references) instead of
           # reasoning from `gh pr diff` alone. Deliberately read-only — no Edit
           # or mutating Bash — so the workflow stays fork-safe and resistant to
           # prompt injection from untrusted PR content.
