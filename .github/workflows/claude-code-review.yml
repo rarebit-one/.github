@@ -20,6 +20,18 @@ env:
   CLAUDE_MODEL: "${{ vars.CLAUDE_MODEL || 'claude-opus-4-8' }}"
   # Hoisted so the retry attempts below cannot drift apart. GitHub Actions has
   # no YAML anchors, so the alternative is three copies of this block.
+  # Hoisted for the same reason as REVIEW_PROMPT below: three copies of this
+  # across the retry attempts is three chances for the reviewer's tool
+  # permissions to silently diverge. Read-only by design — no Edit, no mutating
+  # Bash — so the workflow stays fork-safe against prompt injection from
+  # untrusted PR content.
+  #
+  # 🔴 Holds NO `--model`, deliberately. A workflow-level `env:` entry cannot
+  # read the `env` context, so `--model ${{ env.CLAUDE_MODEL }}` written HERE
+  # would expand to an empty string and every review would run on the action's
+  # default model, silently. The step's `with:` CAN read `env`, so the two are
+  # composed there and CLAUDE_MODEL above stays the single source of truth.
+  CLAUDE_TOOL_ARGS: '--allowed-tools "Read,Glob,Grep,Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)" --effort high'
   REVIEW_PROMPT: |
     REPO: ${{ github.repository }}
     PR NUMBER: ${{ github.event.pull_request.number }}
@@ -91,6 +103,11 @@ jobs:
       # making this check `required` anywhere (rarebit-sre#201) — gating on it
       # without a much longer wait converts an upstream blip into a hard block
       # across every auto-landing repo.
+      - name: Mark attempt start
+        id: t_1
+        if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]'
+        run: echo "ts=$(date +%s)" >> "$GITHUB_OUTPUT"
+
       - name: Run Claude Code Review
         id: review_1
         if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]'
@@ -101,20 +118,41 @@ jobs:
           track_progress: true
           allowed_bots: '*'
           prompt: ${{ env.REVIEW_PROMPT }}
-          # Read/Glob/Grep let the reviewer inspect the checked-out source (type
-          # defs, tests, the CLAUDE.md the prompt references) instead of
-          # reasoning from `gh pr diff` alone. Deliberately read-only — no Edit
-          # or mutating Bash — so the workflow stays fork-safe and resistant to
-          # prompt injection from untrusted PR content.
-          claude_args: '--model ${{ env.CLAUDE_MODEL }} --allowed-tools "Read,Glob,Grep,Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)" --effort high'
+          claude_args: '--model ${{ env.CLAUDE_MODEL }} ${{ env.CLAUDE_TOOL_ARGS }}'
+
+      # Retry only a CHEAP failure. The transient rejection this exists for dies
+      # in under a second having spent $0; a failure DEEP into a real review has
+      # already burned turns and dollars, and retrying it twice more would
+      # triple that spend and can approach the job's 30-minute timeout on a
+      # large PR. Elapsed wall-clock separates the two without depending on the
+      # action's internal output file, whose path is an implementation detail.
+      - name: Is attempt 1 cheaply retryable?
+        id: retryable_1
+        if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.review_1.outcome == 'failure'
+        env:
+          STARTED_AT: ${{ steps.t_1.outputs.ts }}
+        run: |
+          elapsed=$(( $(date +%s) - STARTED_AT ))
+          if [ "$elapsed" -lt 120 ]; then
+            echo "Attempt 1 failed after ${elapsed}s — cheap, retrying."
+            echo "retry=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Attempt 1 failed after ${elapsed}s — too expensive to be the known transient blip; not retrying."
+            echo "retry=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Back off before first retry
-        if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.review_1.outcome == 'failure'
+        if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.review_1.outcome == 'failure' && steps.retryable_1.outputs.retry == 'true'
         run: sleep 60
+
+      - name: Mark attempt start
+        id: t_2
+        if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.review_1.outcome == 'failure' && steps.retryable_1.outputs.retry == 'true'
+        run: echo "ts=$(date +%s)" >> "$GITHUB_OUTPUT"
 
       - name: Run Claude Code Review (retry 1)
         id: review_2
-        if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.review_1.outcome == 'failure'
+        if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.review_1.outcome == 'failure' && steps.retryable_1.outputs.retry == 'true'
         continue-on-error: true
         uses: anthropics/claude-code-action@e63208cb983318a44e3f945e959ef894b707dcfa # v1.0.192
         with:
@@ -122,32 +160,67 @@ jobs:
           track_progress: true
           allowed_bots: '*'
           prompt: ${{ env.REVIEW_PROMPT }}
-          # Read/Glob/Grep let the reviewer inspect the checked-out source (type
-          # defs, tests, the CLAUDE.md the prompt references) instead of
-          # reasoning from `gh pr diff` alone. Deliberately read-only — no Edit
-          # or mutating Bash — so the workflow stays fork-safe and resistant to
-          # prompt injection from untrusted PR content.
-          claude_args: '--model ${{ env.CLAUDE_MODEL }} --allowed-tools "Read,Glob,Grep,Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)" --effort high'
+          claude_args: '--model ${{ env.CLAUDE_MODEL }} ${{ env.CLAUDE_TOOL_ARGS }}'
+
+      # Retry only a CHEAP failure. The transient rejection this exists for dies
+      # in under a second having spent $0; a failure DEEP into a real review has
+      # already burned turns and dollars, and retrying it twice more would
+      # triple that spend and can approach the job's 30-minute timeout on a
+      # large PR. Elapsed wall-clock separates the two without depending on the
+      # action's internal output file, whose path is an implementation detail.
+      - name: Is attempt 2 cheaply retryable?
+        id: retryable_2
+        if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.review_1.outcome == 'failure' && steps.review_2.outcome == 'failure' && steps.retryable_1.outputs.retry == 'true'
+        env:
+          STARTED_AT: ${{ steps.t_2.outputs.ts }}
+        run: |
+          elapsed=$(( $(date +%s) - STARTED_AT ))
+          if [ "$elapsed" -lt 120 ]; then
+            echo "Attempt 2 failed after ${elapsed}s — cheap, retrying."
+            echo "retry=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Attempt 2 failed after ${elapsed}s — too expensive to be the known transient blip; not retrying."
+            echo "retry=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Back off before final retry
-        if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.review_1.outcome == 'failure' && steps.review_2.outcome == 'failure'
+        if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.review_1.outcome == 'failure' && steps.review_2.outcome == 'failure' && steps.retryable_1.outputs.retry == 'true' && steps.retryable_2.outputs.retry == 'true'
         run: sleep 300
 
-      # Deliberately NOT continue-on-error: the last attempt is allowed to fail
-      # the job, so a genuine error still reds the check instead of passing
-      # silently.
+      - name: Mark attempt start
+        id: t_3
+        if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.review_1.outcome == 'failure' && steps.review_2.outcome == 'failure' && steps.retryable_1.outputs.retry == 'true' && steps.retryable_2.outputs.retry == 'true'
+        run: echo "ts=$(date +%s)" >> "$GITHUB_OUTPUT"
+
       - name: Run Claude Code Review (retry 2)
         id: review_3
-        if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.review_1.outcome == 'failure' && steps.review_2.outcome == 'failure'
+        if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.review_1.outcome == 'failure' && steps.review_2.outcome == 'failure' && steps.retryable_1.outputs.retry == 'true' && steps.retryable_2.outputs.retry == 'true'
+        continue-on-error: true
         uses: anthropics/claude-code-action@e63208cb983318a44e3f945e959ef894b707dcfa # v1.0.192
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
           allowed_bots: '*'
           prompt: ${{ env.REVIEW_PROMPT }}
-          # Read/Glob/Grep let the reviewer inspect the checked-out source (type
-          # defs, tests, the CLAUDE.md the prompt references) instead of
-          # reasoning from `gh pr diff` alone. Deliberately read-only — no Edit
-          # or mutating Bash — so the workflow stays fork-safe and resistant to
-          # prompt injection from untrusted PR content.
-          claude_args: '--model ${{ env.CLAUDE_MODEL }} --allowed-tools "Read,Glob,Grep,Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)" --effort high'
+          claude_args: '--model ${{ env.CLAUDE_MODEL }} ${{ env.CLAUDE_TOOL_ARGS }}'
+
+      # 🔴 THE step that owns this job's result. Every attempt above is
+      # continue-on-error, so without this the job would go GREEN whenever the
+      # retry chain stops early — which it deliberately does when a failure was
+      # too expensive to be the known transient blip. A skipped attempt has
+      # outcome `skipped`, never `success`, so only a real success clears this.
+      - name: Review verdict
+        if: always() && steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]'
+        env:
+          O1: ${{ steps.review_1.outcome }}
+          O2: ${{ steps.review_2.outcome }}
+          O3: ${{ steps.review_3.outcome }}
+        run: |
+          for o in "$O1" "$O2" "$O3"; do
+            if [ "$o" = "success" ]; then
+              echo "Claude Code Review succeeded (attempt outcomes: $O1 / $O2 / $O3)."
+              exit 0
+            fi
+          done
+          echo "::error::Claude Code Review did not succeed. Attempt outcomes: $O1 / $O2 / $O3."
+          exit 1
