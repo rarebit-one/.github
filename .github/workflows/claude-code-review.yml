@@ -18,16 +18,16 @@ env:
   # workflows. Override org-wide via the CLAUDE_MODEL Actions variable; the
   # literal is a safe fallback so an unset var can't yield an empty --model.
   CLAUDE_MODEL: "${{ vars.CLAUDE_MODEL || 'claude-opus-4-8' }}"
-  # Hoisted so the retry attempts below cannot drift apart. GitHub Actions has
-  # no YAML anchors, so the alternative is three copies of this block.
-  # Hoisted for the same reason as REVIEW_PROMPT below: three copies of this
-  # across the retry attempts is three chances for the reviewer's tool
-  # permissions to silently diverge. Read-only by design — no Edit, no mutating
-  # Bash — so the workflow stays fork-safe against prompt injection from
+  # CLAUDE_TOOL_ARGS and REVIEW_PROMPT are both hoisted for one reason: the
+  # review step below runs up to three times (see the retry block), Actions has
+  # no YAML anchors, and three copies of either is three chances for them to
+  # drift apart. For the tool list that drift would be a silent widening of the
+  # reviewer's permissions — it is read-only by design (no Edit, no mutating
+  # Bash) so the workflow stays fork-safe against prompt injection from
   # untrusted PR content.
   #
-  # 🔴 Holds NO `--model`, deliberately. A workflow-level `env:` entry cannot
-  # read the `env` context, so `--model ${{ env.CLAUDE_MODEL }}` written HERE
+  # 🔴 CLAUDE_TOOL_ARGS holds NO `--model`, deliberately. A workflow-level
+  # `env:` entry cannot read the `env` context, so `--model ${{ env.CLAUDE_MODEL }}` written HERE
   # would expand to an empty string and every review would run on the action's
   # default model, silently. The step's `with:` CAN read `env`, so the two are
   # composed there and CLAUDE_MODEL above stays the single source of truth.
