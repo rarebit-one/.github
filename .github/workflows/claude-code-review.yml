@@ -27,10 +27,11 @@ env:
   # untrusted PR content.
   #
   # 🔴 CLAUDE_TOOL_ARGS holds NO `--model`, deliberately. A workflow-level
-  # `env:` entry cannot read the `env` context, so `--model ${{ env.CLAUDE_MODEL }}` written HERE
-  # would expand to an empty string and every review would run on the action's
-  # default model, silently. The step's `with:` CAN read `env`, so the two are
-  # composed there and CLAUDE_MODEL above stays the single source of truth.
+  # `env:` entry cannot read the `env` context, so writing
+  # `--model ${{ env.CLAUDE_MODEL }}` HERE would expand to an empty string and
+  # every review would run on the action's default model, silently. The step's
+  # `with:` CAN read `env`, so the two are composed there and CLAUDE_MODEL above
+  # stays the single source of truth.
   CLAUDE_TOOL_ARGS: '--allowed-tools "Read,Glob,Grep,Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)" --effort high'
   REVIEW_PROMPT: |
     REPO: ${{ github.repository }}
