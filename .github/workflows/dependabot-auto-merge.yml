@@ -108,6 +108,29 @@ on:
           callers pass their homelab label (e.g. `hyperion`).
         type: string
         default: 'ubuntu-latest'
+      maintainer-review-check:
+        description: >-
+          Name of the code-review check that must have CONCLUDED before the
+          maintainer path enables auto-merge. See the MAINTAINER PATH note on
+          the `auto-merge` job: the actor gate authenticates who pushed, not
+          who wrote the diff, so the review concluding is what actually
+          distinguishes a reviewed PR from an unreviewed one.
+          Matched EXACTLY or as a "<caller job name> / <this>" suffix, because a
+          `workflow_call` job's check-run carries the caller's job name as a
+          prefix (`review / Claude Code Review`, `Claude Code Review / Claude
+          Code Review`) — pass the full composite string to pin one precisely.
+          Set to an empty string ONLY on a repo that runs no code review at all — that restores
+          the old fail-open behaviour and is reported as such in the summary.
+        type: string
+        default: 'Claude Code Review'
+      maintainer-review-timeout-seconds:
+        description: >-
+          How long to wait for that check to conclude before giving up and
+          leaving the PR for a human. Not a merge delay — auto-merge still waits
+          on required checks afterwards; this only bounds the wait for the
+          review VERDICT.
+        type: number
+        default: 600
 
 jobs:
   auto-merge:
@@ -124,9 +147,38 @@ jobs:
     # prefix narrows the App down to the vetted subset. A human login is not a
     # shared identity: `github.actor` is stamped by GitHub from the
     # authenticated actor, is not settable from the PR, and cannot be reached by
-    # a fork or by anyone able to push a branch. So actor == 'jaryl' already
-    # means "the maintainer did this", and a branch convention on top would be
-    # decoration, not security.
+    # a fork or by anyone able to push a branch.
+    #
+    # CORRECTED 2026-08-24 — this block used to conclude from that: "so
+    # actor == 'jaryl' already means 'the maintainer did this', and a branch
+    # convention on top would be decoration, not security." The premise is
+    # sound and the conclusion does not follow. `github.actor` is a fact about
+    # AUTHENTICATION — who pushed — and the thing being inferred from it is
+    # AUTHORSHIP: who wrote the diff and whether a human read it. An agent
+    # session runs under the maintainer's own credentials, so it satisfies
+    # every condition here while nobody has read the code.
+    #
+    # That is not hypothetical. On 2026-08-24 this path auto-merged FOUR
+    # `rarebit-sre` PRs (#309, #313, #314, #315) with zero human approvals, a
+    # median of 32 seconds from open to merge, each one landing 1m34s–3m21s
+    # BEFORE its own review concluded — the reviewer's comments on #309 and
+    # #315 open with "This PR is already merged, so the following is
+    # retrospective feedback for follow-up, not a merge gate." #313 merged
+    # 3m21s ahead of a review flagging a comment that contradicted its own
+    # code, and was reverted four hours later by #314 for not building.
+    #
+    # Every identity-shaped fix for this fails OPEN, which is why none is used
+    # here. Measured on the same day: `Co-Authored-By: Claude` appears on 20 of
+    # 60 recent `rarebit-sre` commits and on ZERO of the four that merged, all
+    # of which read author == committer == the maintainer, verified, no
+    # trailer. A trailer rule, a committer-vs-author rule and a branch-prefix
+    # rule would each have merged all four identically.
+    #
+    # So the gate is not on identity at all: the maintainer path now requires
+    # the code-review check to have CONCLUDED, and to have concluded cleanly.
+    # That is a fact about whether the PR was reviewed, which is the property
+    # actually wanted, and it is unforgeable by anything the author controls.
+    # See the `maintainer_review_gate` step.
     #
     # Two conditions ARE added on top of the actor:
     #   * `pull_request.user.login == 'jaryl'` — on a `synchronize` event the
@@ -158,10 +210,28 @@ jobs:
         github.event.pull_request.user.login == 'jaryl' &&
         github.event.pull_request.draft == false)
     runs-on: ${{ inputs.runner-label }}
-    timeout-minutes: 10
+    # 20, not 10: the maintainer review gate can itself wait up to
+    # `maintainer-review-timeout-seconds` (default 600s) on top of the App-token
+    # mint and token resolution. If the job's own ceiling fired first, GitHub
+    # would cancel the whole job rather than let the gate finish its graceful
+    # `unknown` degrade — and steps after a job-level timeout, including the
+    # `if: always()` reporter, are not reliably run. That would redden exactly
+    # the PRs this design goes out of its way not to redden, via the outer
+    # timeout instead of the inner one. Keep this comfortably above the poll
+    # budget if either number changes.
+    timeout-minutes: 20
     permissions:
       contents: write
       pull-requests: write
+      # REQUIRED by the maintainer review gate, which reads
+      # GET /repos/.../commits/{sha}/check-runs with the ambient GITHUB_TOKEN.
+      # An explicit `permissions:` block sets every UNLISTED scope to `none`,
+      # on public and private repos alike, overriding any org or repo default —
+      # so without this line that read 403s unconditionally, the `|| true`
+      # swallows it, `$runs` stays empty for the whole poll window, and every
+      # maintainer PR lands on `unknown`. Safe, but it silently kills
+      # auto-merge on the maintainer path entirely rather than gating it.
+      checks: read
     steps:
       - name: Mint a release-bot App token for the merge
         id: app_token
@@ -326,11 +396,156 @@ jobs:
           fi
           echo "auto-merge queued (or already merged) on $PR_URL" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Require the review to have concluded — maintainer PR
+        id: maintainer_review_gate
+        if: github.actor == 'jaryl'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CHECK_NAME: ${{ inputs.maintainer-review-check }}
+          TIMEOUT_S: ${{ inputs.maintainer-review-timeout-seconds }}
+        run: |
+          # THREE outcomes, not two. The defect this closes was a gate with
+          # only "merge" and "don't merge", where "the review has not answered
+          # yet" was indistinguishable from "the review was fine" — so the
+          # absence of a verdict read as a pass. Per
+          # `.claude/conventions/check-positive-controls.md`, a check that has
+          # not returned is UNVERIFIED, never negative.
+          #
+          #   clean    → the review concluded and did not fail  → enable
+          #   failed   → the review concluded and failed        → do not enable
+          #   unknown  → absent, timed out, or unreadable       → do not enable
+          #
+          # KNOWN LIMIT, stated rather than papered over: `clean` means the
+          # review check concluded green, which is NOT identical to "a review
+          # ran". `claude-code-review.yml`'s job deliberately concludes green
+          # without spending LLM budget on a Dependabot PR, and its
+          # `token-check` does the same when `CLAUDE_CODE_OAUTH_TOKEN` is
+          # missing. So on a repo where that secret is not wired up, a
+          # maintainer PR reads as reviewed with no review having happened —
+          # the same absence-reads-as-clean shape this gate closes, one layer
+          # down, in a check this workflow does not own. Closing it properly
+          # means the review job distinguishing "reviewed" from "skipped" in
+          # its own conclusion; until then, wiring the secret is a
+          # prerequisite for trusting this gate, not an optional extra.
+          #
+          # `unknown` deliberately does NOT fail the job. A PR that needs a
+          # human to press merge is a normal outcome, not a broken pipeline;
+          # failing here would redden every such PR and train people to ignore
+          # it. It is reported loudly in the step summary instead, which is the
+          # thing that makes "nothing was enabled" legible.
+          set -euo pipefail
+
+          if [ -z "$CHECK_NAME" ]; then
+            echo "verdict=clean" >> "$GITHUB_OUTPUT"
+            echo "detail=review gate disabled by caller (maintainer-review-check is empty)" >> "$GITHUB_OUTPUT"
+            echo "::warning::Maintainer review gate is DISABLED on $REPO — auto-merge will land this PR without any review having concluded."
+            exit 0
+          fi
+
+          deadline=$(( $(date +%s) + TIMEOUT_S ))
+          verdict=unknown
+          detail="no check named '$CHECK_NAME' appeared for $HEAD_SHA"
+
+          while :; do
+            # MATCH ON THE JOB NAME, OR ON A "<caller job> / <job>" SUFFIX.
+            #
+            # A check-run produced by a `workflow_call` job is named
+            # "<caller job name> / <called job name>", NOT the called job's name
+            # alone — `review / Claude Code Review` on sidekick-labs repos,
+            # `Claude Code Review / Claude Code Review` on this one. An exact
+            # match against a bare `Claude Code Review` therefore matches
+            # NOTHING, every maintainer PR burns the full timeout and lands on
+            # `unknown`, and the gate silently stops gating.
+            #
+            # That is this PR's own failure mode reproduced one layer down, so
+            # it is matched structurally rather than by asking every caller to
+            # spell the composite name correctly: exact, or anything ending in
+            # "/ <name>". Callers may still pass the full composite string to
+            # pin it precisely.
+            #
+            # `|| true` on the read, then an explicit empty-check: an API blip
+            # must land in `unknown`, never in a silent pass.
+            runs=$(gh api "/repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
+                     --jq '.check_runs[]
+                           | select(.name == env.CHECK_NAME
+                                    or (.name | endswith("/ " + env.CHECK_NAME)))
+                           | "\(.status)\t\(.conclusion // "-")\t\(.name)"' 2>/dev/null || true)
+
+            if [ -n "$runs" ]; then
+              # FIELD-SPLIT WITH awk, NOT `grep -E '\t'`.
+              #
+              # `jq`'s "\t" emits a real tab (0x09), but GNU grep's -E does NOT
+              # expand the two-character escape `\t` — it matches a literal `t`.
+              # BSD grep on macOS does, so this is the worst shape of bug: it
+              # passes when a maintainer tries it locally and fails on the
+              # Ubuntu/self-hosted runner where it actually runs.
+              #
+              # Its consequence was this PR's own incident, reproduced inside
+              # the fix: the failure branch could never match, so `verdict` was
+              # assigned `clean` unconditionally for ANY completed run — a gate
+              # that rubber-stamps every review as passing. awk's -F is
+              # unambiguous on every platform, so the class of bug goes away
+              # rather than being fixed once.
+              incomplete=$(printf '%s\n' "$runs" | awk -F'\t' '$1 != "completed"' | head -1)
+              if [ -n "$incomplete" ]; then
+                : # still in flight — keep waiting
+              else
+                # Report the conclusion that DROVE the classification, not
+                # whichever line happened to sort first — on a repo with re-run
+                # history for the same check name those differ, and a summary
+                # that disagrees with the decision is worse than no summary.
+                driving=$(printf '%s\n' "$runs" | awk -F'\t' '
+                  $1 == "completed" && ($2 == "failure" || $2 == "timed_out" ||
+                                        $2 == "cancelled" || $2 == "action_required")' | head -1)
+                if [ -n "$driving" ]; then
+                  verdict=failed
+                else
+                  verdict=clean
+                  driving=$(printf '%s\n' "$runs" | head -1)
+                fi
+                detail="$(printf '%s' "$driving" | cut -f3) concluded $(printf '%s' "$driving" | cut -f2)"
+                break
+              fi
+            fi
+
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              if [ -n "$runs" ]; then
+                detail="'$CHECK_NAME' was still running after ${TIMEOUT_S}s"
+              fi
+              break
+            fi
+            sleep 15
+          done
+
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          echo "detail=$detail" >> "$GITHUB_OUTPUT"
+
+          case "$verdict" in
+            clean)
+              echo "✅ Review gate: $detail — proceeding to enable auto-merge." >> "$GITHUB_STEP_SUMMARY" ;;
+            failed)
+              echo "::warning::Not enabling auto-merge — $detail"
+              echo "🛑 **Review gate: $detail.** Auto-merge was NOT enabled; fix the review findings, or merge by hand if you disagree with them." >> "$GITHUB_STEP_SUMMARY" ;;
+            unknown)
+              echo "::warning::Not enabling auto-merge — $detail. This is UNKNOWN, not clean."
+              {
+                echo "⚠️ **Review gate: UNKNOWN — $detail.**"
+                echo ""
+                echo "Auto-merge was **not** enabled. This is deliberate: an absent or unfinished review is not evidence of a clean one."
+                echo ""
+                echo "If this repo genuinely runs no code review, the caller should pass \`maintainer-review-check: ''\` explicitly rather than letting every maintainer PR land here."
+              } >> "$GITHUB_STEP_SUMMARY" ;;
+          esac
+
       - name: Enable auto-merge — maintainer PR
         id: maintainer_enable
         # The job-level `if` already required actor == author == 'jaryl' and
-        # not-a-draft; this narrows the step to that path.
-        if: github.actor == 'jaryl'
+        # not-a-draft; this narrows the step to that path, and additionally
+        # requires the review to have CONCLUDED CLEANLY (see the step above and
+        # the MAINTAINER PATH note on the job).
+        if: github.actor == 'jaryl' && steps.maintainer_review_gate.outputs.verdict == 'clean'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MERGE_TOKEN: ${{ steps.app_token.outputs.token || secrets.AUTOLAND_PAT || secrets.GITHUB_TOKEN }}
@@ -366,6 +581,8 @@ jobs:
           DEPENDABOT_OUTCOME: ${{ steps.dependabot_enable.outcome }}
           ENGINE_OUTCOME: ${{ steps.engine_enable.outcome }}
           MAINTAINER_OUTCOME: ${{ steps.maintainer_enable.outcome }}
+          REVIEW_VERDICT: ${{ steps.maintainer_review_gate.outputs.verdict }}
+          REVIEW_DETAIL: ${{ steps.maintainer_review_gate.outputs.detail }}
           MERGE_TOKEN_MODE: ${{ steps.token.outputs.mode }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
@@ -382,10 +599,19 @@ jobs:
             echo "| dependabot step | ${DEPENDABOT_OUTCOME} |"
             echo "| engine step | ${ENGINE_OUTCOME} |"
             echo "| maintainer step | ${MAINTAINER_OUTCOME} |"
+            echo "| maintainer review gate | ${REVIEW_VERDICT:-n/a} — ${REVIEW_DETAIL:-—} |"
             echo "| merge token | ${MERGE_TOKEN_MODE:-unknown} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          if [ "$DEPENDABOT_OUTCOME" = "skipped" ] && [ "$ENGINE_OUTCOME" = "skipped" ] && [ "$MAINTAINER_OUTCOME" = "skipped" ]; then
+          # A maintainer PR held by the review gate is a DISTINCT outcome from
+          # "the gate didn't match anything", and must not be reported as the
+          # generic nothing-was-enabled case below — that message tells you to
+          # widen the gate, which is the opposite of what happened here.
+          if [ "$REVIEW_VERDICT" = "failed" ] || [ "$REVIEW_VERDICT" = "unknown" ]; then
+            echo "::warning::auto-lander held $PR_URL — review gate verdict '${REVIEW_VERDICT}': ${REVIEW_DETAIL}. Merge by hand once the review has concluded."
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "🛑 **Held by the review gate (${REVIEW_VERDICT}).** This PR will not land on its own until a review has concluded cleanly — merge it by hand if you are satisfied without one." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$DEPENDABOT_OUTCOME" = "skipped" ] && [ "$ENGINE_OUTCOME" = "skipped" ] && [ "$MAINTAINER_OUTCOME" = "skipped" ]; then
             echo "::warning::auto-lander enabled nothing on $PR_URL — update-type=${UPDATE_TYPE:-none} group=${DEP_GROUP:-none} ecosystem=${ECOSYSTEM:-none}. If this bump should land automatically, the gate needs widening; if it is a major, it is correctly waiting for a human."
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "⚠️ **Nothing was enabled** — this PR will not land on its own." >> "$GITHUB_STEP_SUMMARY"
