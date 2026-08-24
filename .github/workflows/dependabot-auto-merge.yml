@@ -223,6 +223,15 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      # REQUIRED by the maintainer review gate, which reads
+      # GET /repos/.../commits/{sha}/check-runs with the ambient GITHUB_TOKEN.
+      # An explicit `permissions:` block sets every UNLISTED scope to `none`,
+      # on public and private repos alike, overriding any org or repo default —
+      # so without this line that read 403s unconditionally, the `|| true`
+      # swallows it, `$runs` stays empty for the whole poll window, and every
+      # maintainer PR lands on `unknown`. Safe, but it silently kills
+      # auto-merge on the maintainer path entirely rather than gating it.
+      checks: read
     steps:
       - name: Mint a release-bot App token for the merge
         id: app_token
@@ -465,18 +474,33 @@ jobs:
                            | "\(.status)\t\(.conclusion // "-")\t\(.name)"' 2>/dev/null || true)
 
             if [ -n "$runs" ]; then
-              # Take the most conservative reading across matching runs: any
-              # still-running instance means we do not have a verdict yet.
-              if printf '%s\n' "$runs" | grep -qv '^completed'; then
+              # FIELD-SPLIT WITH awk, NOT `grep -E '\t'`.
+              #
+              # `jq`'s "\t" emits a real tab (0x09), but GNU grep's -E does NOT
+              # expand the two-character escape `\t` — it matches a literal `t`.
+              # BSD grep on macOS does, so this is the worst shape of bug: it
+              # passes when a maintainer tries it locally and fails on the
+              # Ubuntu/self-hosted runner where it actually runs.
+              #
+              # Its consequence was this PR's own incident, reproduced inside
+              # the fix: the failure branch could never match, so `verdict` was
+              # assigned `clean` unconditionally for ANY completed run — a gate
+              # that rubber-stamps every review as passing. awk's -F is
+              # unambiguous on every platform, so the class of bug goes away
+              # rather than being fixed once.
+              incomplete=$(printf '%s\n' "$runs" | awk -F'\t' '$1 != "completed"' | head -1)
+              if [ -n "$incomplete" ]; then
                 : # still in flight — keep waiting
               else
                 # Report the conclusion that DROVE the classification, not
                 # whichever line happened to sort first — on a repo with re-run
                 # history for the same check name those differ, and a summary
                 # that disagrees with the decision is worse than no summary.
-                if printf '%s\n' "$runs" | grep -qE '^completed\t(failure|timed_out|cancelled|action_required)\t'; then
+                driving=$(printf '%s\n' "$runs" | awk -F'\t' '
+                  $1 == "completed" && ($2 == "failure" || $2 == "timed_out" ||
+                                        $2 == "cancelled" || $2 == "action_required")' | head -1)
+                if [ -n "$driving" ]; then
                   verdict=failed
-                  driving=$(printf '%s\n' "$runs" | grep -E '^completed\t(failure|timed_out|cancelled|action_required)\t' | head -1)
                 else
                   verdict=clean
                   driving=$(printf '%s\n' "$runs" | head -1)
