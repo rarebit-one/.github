@@ -114,8 +114,12 @@ on:
           maintainer path enables auto-merge. See the MAINTAINER PATH note on
           the `auto-merge` job: the actor gate authenticates who pushed, not
           who wrote the diff, so the review concluding is what actually
-          distinguishes a reviewed PR from an unreviewed one. Set to an empty
-          string ONLY on a repo that runs no code review at all — that restores
+          distinguishes a reviewed PR from an unreviewed one.
+          Matched EXACTLY or as a "<caller job name> / <this>" suffix, because a
+          `workflow_call` job's check-run carries the caller's job name as a
+          prefix (`review / Claude Code Review`, `Claude Code Review / Claude
+          Code Review`) — pass the full composite string to pin one precisely.
+          Set to an empty string ONLY on a repo that runs no code review at all — that restores
           the old fail-open behaviour and is reported as such in the summary.
         type: string
         default: 'Claude Code Review'
@@ -206,7 +210,16 @@ jobs:
         github.event.pull_request.user.login == 'jaryl' &&
         github.event.pull_request.draft == false)
     runs-on: ${{ inputs.runner-label }}
-    timeout-minutes: 10
+    # 20, not 10: the maintainer review gate can itself wait up to
+    # `maintainer-review-timeout-seconds` (default 600s) on top of the App-token
+    # mint and token resolution. If the job's own ceiling fired first, GitHub
+    # would cancel the whole job rather than let the gate finish its graceful
+    # `unknown` degrade — and steps after a job-level timeout, including the
+    # `if: always()` reporter, are not reliably run. That would redden exactly
+    # the PRs this design goes out of its way not to redden, via the outer
+    # timeout instead of the inner one. Keep this comfortably above the poll
+    # budget if either number changes.
+    timeout-minutes: 20
     permissions:
       contents: write
       pull-requests: write
@@ -395,6 +408,19 @@ jobs:
           #   failed   → the review concluded and failed        → do not enable
           #   unknown  → absent, timed out, or unreadable       → do not enable
           #
+          # KNOWN LIMIT, stated rather than papered over: `clean` means the
+          # review check concluded green, which is NOT identical to "a review
+          # ran". `claude-code-review.yml`'s job deliberately concludes green
+          # without spending LLM budget on a Dependabot PR, and its
+          # `token-check` does the same when `CLAUDE_CODE_OAUTH_TOKEN` is
+          # missing. So on a repo where that secret is not wired up, a
+          # maintainer PR reads as reviewed with no review having happened —
+          # the same absence-reads-as-clean shape this gate closes, one layer
+          # down, in a check this workflow does not own. Closing it properly
+          # means the review job distinguishing "reviewed" from "skipped" in
+          # its own conclusion; until then, wiring the secret is a
+          # prerequisite for trusting this gate, not an optional extra.
+          #
           # `unknown` deliberately does NOT fail the job. A PR that needs a
           # human to press merge is a normal outcome, not a broken pipeline;
           # failing here would redden every such PR and train people to ignore
@@ -414,10 +440,29 @@ jobs:
           detail="no check named '$CHECK_NAME' appeared for $HEAD_SHA"
 
           while :; do
+            # MATCH ON THE JOB NAME, OR ON A "<caller job> / <job>" SUFFIX.
+            #
+            # A check-run produced by a `workflow_call` job is named
+            # "<caller job name> / <called job name>", NOT the called job's name
+            # alone — `review / Claude Code Review` on sidekick-labs repos,
+            # `Claude Code Review / Claude Code Review` on this one. An exact
+            # match against a bare `Claude Code Review` therefore matches
+            # NOTHING, every maintainer PR burns the full timeout and lands on
+            # `unknown`, and the gate silently stops gating.
+            #
+            # That is this PR's own failure mode reproduced one layer down, so
+            # it is matched structurally rather than by asking every caller to
+            # spell the composite name correctly: exact, or anything ending in
+            # "/ <name>". Callers may still pass the full composite string to
+            # pin it precisely.
+            #
             # `|| true` on the read, then an explicit empty-check: an API blip
             # must land in `unknown`, never in a silent pass.
             runs=$(gh api "/repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
-                     --jq '.check_runs[] | select(.name == env.CHECK_NAME) | "\(.status)\t\(.conclusion // "-")"' 2>/dev/null || true)
+                     --jq '.check_runs[]
+                           | select(.name == env.CHECK_NAME
+                                    or (.name | endswith("/ " + env.CHECK_NAME)))
+                           | "\(.status)\t\(.conclusion // "-")\t\(.name)"' 2>/dev/null || true)
 
             if [ -n "$runs" ]; then
               # Take the most conservative reading across matching runs: any
@@ -425,13 +470,18 @@ jobs:
               if printf '%s\n' "$runs" | grep -qv '^completed'; then
                 : # still in flight — keep waiting
               else
-                if printf '%s\n' "$runs" | grep -qE '^completed\t(failure|timed_out|cancelled|action_required)$'; then
+                # Report the conclusion that DROVE the classification, not
+                # whichever line happened to sort first — on a repo with re-run
+                # history for the same check name those differ, and a summary
+                # that disagrees with the decision is worse than no summary.
+                if printf '%s\n' "$runs" | grep -qE '^completed\t(failure|timed_out|cancelled|action_required)\t'; then
                   verdict=failed
-                  detail="'$CHECK_NAME' concluded $(printf '%s\n' "$runs" | head -1 | cut -f2)"
+                  driving=$(printf '%s\n' "$runs" | grep -E '^completed\t(failure|timed_out|cancelled|action_required)\t' | head -1)
                 else
                   verdict=clean
-                  detail="'$CHECK_NAME' concluded $(printf '%s\n' "$runs" | head -1 | cut -f2)"
+                  driving=$(printf '%s\n' "$runs" | head -1)
                 fi
+                detail="$(printf '%s' "$driving" | cut -f3) concluded $(printf '%s' "$driving" | cut -f2)"
                 break
               fi
             fi
