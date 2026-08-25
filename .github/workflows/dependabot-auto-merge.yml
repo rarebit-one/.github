@@ -223,15 +223,24 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      # REQUIRED by the maintainer review gate, which reads
-      # GET /repos/.../commits/{sha}/check-runs with the ambient GITHUB_TOKEN.
-      # An explicit `permissions:` block sets every UNLISTED scope to `none`,
-      # on public and private repos alike, overriding any org or repo default —
-      # so without this line that read 403s unconditionally, the `|| true`
-      # swallows it, `$runs` stays empty for the whole poll window, and every
-      # maintainer PR lands on `unknown`. Safe, but it silently kills
-      # auto-merge on the maintainer path entirely rather than gating it.
-      checks: read
+      # NO `checks: read` here — deliberately, and this is load-bearing.
+      #
+      # A reusable workflow cannot obtain a token scope the CALLER did not grant:
+      # if this job's `permissions:` requests `checks: read` but the caller's
+      # `permissions:` block does not include it, GitHub refuses the run at
+      # START — `startup_failure`, 0s, before any `if` is evaluated. Every one of
+      # the ~16 thin callers pins `{contents: write, pull-requests: write}` and
+      # none grants checks, so adding `checks: read` here (PR #114) took out
+      # Dependabot auto-merge estate-wide the moment a real Dependabot/maintainer
+      # PR triggered it. See rarebit-one/rarebit-ops (DEP-001).
+      #
+      # The maintainer review gate still needs to READ check-runs. It does so
+      # with the release-bot App installation token (minted below with
+      # `permission-checks: read`), NOT the ambient GITHUB_TOKEN — so the read
+      # works without asking any caller to widen its grant. If the App token is
+      # unavailable the gate read fails closed to `unknown` and holds the PR for
+      # a human, which is the safe degrade. The Dependabot path never reads
+      # checks at all.
     steps:
       - name: Mint a release-bot App token for the merge
         id: app_token
@@ -261,11 +270,16 @@ jobs:
           # token row is what makes that visible — read it, don't assume.
           client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
-          # Scoped to exactly what `gh pr merge --auto` needs. The App holds
-          # more (issues, workflows); an installation token is capped down to
-          # what is requested here, so the enable cannot reach beyond merging.
+          # Scoped to exactly what this job needs. The App holds more (issues,
+          # workflows); an installation token is capped down to what is requested
+          # here, so it cannot reach beyond merging + reading the review verdict.
+          # `permission-checks: read` is what lets the maintainer review gate
+          # read check-runs WITHOUT the job (and therefore every caller) granting
+          # `checks: read` — see the note on the job `permissions:` block above.
+          # The App installation holds `checks: write`, so this scope mints fine.
           permission-contents: write
           permission-pull-requests: write
+          permission-checks: read
 
       - name: Resolve the merge token (App → AUTOLAND_PAT → GITHUB_TOKEN)
         id: token
@@ -400,7 +414,14 @@ jobs:
         id: maintainer_review_gate
         if: github.actor == 'jaryl'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The check-runs read uses the release-bot App token (minted above
+          # with `permission-checks: read`), falling back to the ambient token.
+          # This is what removes the need for the job — and every caller — to
+          # grant `checks: read`, which is what caused the estate-wide
+          # startup_failure (DEP-001). If the App token is empty the fallback
+          # GITHUB_TOKEN has no checks scope, the read fails, and the gate lands
+          # on `unknown` and holds the PR — the intended safe degrade.
+          GH_TOKEN: ${{ steps.app_token.outputs.token || secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           CHECK_NAME: ${{ inputs.maintainer-review-check }}
