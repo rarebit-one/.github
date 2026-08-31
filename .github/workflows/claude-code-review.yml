@@ -212,6 +212,15 @@ jobs:
       # outcome `skipped`, never `success`, so only a real success clears this.
       - name: Review verdict
         if: always() && steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]'
+        # TEMPORARY (2026-08-31): an upstream claude-code-action regression returns
+        # is_error on turn 1 ("directory mismatch … tsconfig.json") DETERMINISTICALLY,
+        # so every retry above fails and this gate red-lines on every PR estate-wide.
+        # The retry chain was built for the INTERMITTENT is_error blip; it can't
+        # absorb a deterministic CLI crash. This review is advisory/non-required, so
+        # continue-on-error keeps the verdict annotation (::error:: above) visible for
+        # diagnosis while stopping the CLI-side flake from blocking clean merges.
+        # Revert this line once upstream is fixed.
+        continue-on-error: true
         env:
           O1: ${{ steps.review_1.outcome }}
           O2: ${{ steps.review_2.outcome }}
