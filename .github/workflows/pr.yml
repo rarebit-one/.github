@@ -24,3 +24,16 @@ jobs:
       id-token: write
     uses: ./.github/workflows/claude-code-review.yml
     secrets: inherit
+
+  # Pins the review gate's known-crash classifier (`is_known_bug` in
+  # claude-code-review.yml) against every execution-file shape and the
+  # negatives it must fail closed on. The test extracts the function from the
+  # workflow YAML itself, so it cannot drift from what actually runs.
+  verdict-classifier:
+    name: Review verdict classifier
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: bash tests/review-verdict-known-bug.test.sh
