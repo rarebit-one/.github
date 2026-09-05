@@ -249,24 +249,38 @@ jobs:
           # num_turns<=1, no api_error_status). Robust to both the JSON-array and the
           # JSONL execution-log shapes; anything else — including any parse failure —
           # returns non-zero and falls through to fail-closed.
+          # ── is_known_bug: begin (tests/review-verdict-known-bug.test.sh extracts this block) ──
+          # Pull the LAST result record out of the execution file whatever its
+          # shape: a pretty-printed JSON array (what the action writes), JSONL, or a
+          # single object. Slurping normalises all three into one array, and the
+          # flatten handles the array-of-array a slurped array file becomes.
+          last_result() {
+            jq -c -s '[.[] | if type == "array" then .[] else . end]
+                      | map(select(type == "object" and .type == "result")) | last' "$1"
+          }
           is_known_bug() {
             f="$1"
-            for slurp in "" "-s"; do
-              r="$(jq -c $slurp '[.[] | select(.type == "result")] | last' "$f" 2>/dev/null || true)"
-              [ -n "$r" ] && [ "$r" != "null" ] || continue
-              [ "$(jq -r '.is_error // false' <<<"$r")" = "true" ] || return 1
-              [ "$(jq -r '.subtype // ""' <<<"$r")" = "success" ] || return 1
-              [ "$(jq -r '.num_turns // 99' <<<"$r")" -le 1 ] 2>/dev/null || return 1
-              [ "$(jq -r 'has("api_error_status") and .api_error_status != null' <<<"$r")" = "false" ] || return 1
-              return 0
-            done
-            return 1
+            r="$(last_result "$f" 2>"${RUNNER_TEMP:-/tmp}/review-verdict-jq.err" || true)"
+            if [ -z "$r" ] || [ "$r" = "null" ]; then
+              echo "verdict: no result record in $f ($(wc -c <"$f" 2>/dev/null || echo 0) bytes; jq: $(head -c 300 "${RUNNER_TEMP:-/tmp}/review-verdict-jq.err" 2>/dev/null))"
+              return 1
+            fi
+            # Print exactly the fields the fingerprint reads, so a mismatch is
+            # diagnosable from the job log instead of a fresh instrumentation PR.
+            echo "verdict: last result record — $(jq -c '{subtype, is_error, num_turns, total_cost_usd, api_error_status: (.api_error_status // null), keys: (keys | join(","))}' <<<"$r")"
+            [ "$(jq -r '.is_error // false' <<<"$r")" = "true" ] || return 1
+            [ "$(jq -r '.subtype // ""' <<<"$r")" = "success" ] || return 1
+            [ "$(jq -r '.num_turns // 99' <<<"$r")" -le 1 ] 2>/dev/null || return 1
+            [ "$(jq -r 'has("api_error_status") and .api_error_status != null' <<<"$r")" = "false" ] || return 1
+            return 0
           }
+          # ── is_known_bug: end ──
           RT="${RUNNER_TEMP:-/tmp}/claude-execution-output.json"
           EF=""
           for cand in "$EF3" "$EF2" "$EF1" "$RT"; do
             if [ -n "$cand" ] && [ -f "$cand" ]; then EF="$cand"; break; fi
           done
+          echo "verdict: attempt outcomes $O1 / $O2 / $O3; execution_file outputs: [${EF1:-}] [${EF2:-}] [${EF3:-}]; reading: ${EF:-<none found, RUNNER_TEMP=${RUNNER_TEMP:-unset}>}"
           if [ -n "$EF" ] && is_known_bug "$EF"; then
             echo "::warning::Claude Code Review CLI crashed on the known 2026-08-31 upstream bug (subtype=success + is_error=true, 0 turns, \$0 — the 'directory mismatch … tsconfig.json' Bun regression). NOT a security bypass and NOT a token/outage failure; passing the gate so the flake does not block merges."
             {
