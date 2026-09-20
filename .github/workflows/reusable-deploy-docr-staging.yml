@@ -396,7 +396,7 @@ jobs:
 
       - name: Set up Docker Buildx
         if: ${{ steps.existing.outputs.exists == 'false' }}
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build and push image
         id: build_push
@@ -404,7 +404,7 @@ jobs:
         # continue-on-error so a transient DOCR push flake gets one retry below.
         # A genuine build failure still fails the job, at the retry step.
         continue-on-error: true
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile }}
@@ -438,7 +438,7 @@ jobs:
       - name: Build and push image (one retry)
         id: build_push_retry
         if: ${{ steps.build_push.outcome == 'failure' }}
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile }}
@@ -603,7 +603,7 @@ jobs:
         # resolves against the CALLER's checkout inside a reusable workflow.
         # This composite never exits non-zero — it reports via outputs, and the
         # gate step below is what fails the job.
-        uses: rarebit-one/.github/.github/actions/do-app-deploy@9cdea8dd905885027d4d50d94f3b00fe60074277
+        uses: rarebit-one/.github/.github/actions/do-app-deploy@00c53e44f6302f1fc3d0e0f9060888d3f63a3575
         with:
           app_id: ${{ secrets.DO_APP_ID }}
           image_repo: ${{ inputs.image_repo }}
