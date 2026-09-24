@@ -494,6 +494,17 @@ jobs:
                                     or (.name | endswith("/ " + env.CHECK_NAME)))
                            | "\(.status)\t\(.conclusion // "-")\t\(.name)"' 2>/dev/null || true)
 
+            # SKIPPED / NEUTRAL / STALE ARE NOT A VERDICT.
+            #
+            # A review run that concluded `skipped` (e.g. the draft-phase run
+            # before `ready_for_review`), `neutral` or `stale` says nothing about
+            # the code. Counting it as "completed and not failed" read as clean:
+            # rarebit-sre#330 merged at 08:10:32 on a skipped draft-phase run
+            # while the real review ran 08:10:33–08:13:54. Drop those rows and
+            # keep waiting for a run that actually concluded; if none arrives
+            # before the deadline the gate lands on `unknown` and holds.
+            runs=$(printf '%s\n' "$runs" | awk -F'\t' 'NF && !($1 == "completed" && ($2 == "skipped" || $2 == "neutral" || $2 == "stale"))')
+
             if [ -n "$runs" ]; then
               # FIELD-SPLIT WITH awk, NOT `grep -E '\t'`.
               #
@@ -534,6 +545,8 @@ jobs:
             if [ "$(date +%s)" -ge "$deadline" ]; then
               if [ -n "$runs" ]; then
                 detail="'$CHECK_NAME' was still running after ${TIMEOUT_S}s"
+              else
+                detail="no concluded (non-skipped) '$CHECK_NAME' run for $HEAD_SHA after ${TIMEOUT_S}s"
               fi
               break
             fi
@@ -587,6 +600,26 @@ jobs:
             exit 1
           fi
           echo "auto-merge queued (or already merged) on $PR_URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Disarm auto-merge — maintainer PR whose review failed
+        # GitHub keeps auto-merge armed across new pushes. Without this, a PR
+        # armed on an earlier head stays armed when the review of a LATER head
+        # concludes red, and lands anyway once required checks pass. Only a
+        # concluded `failed` disarms: `unknown` (review slow or absent) leaves
+        # any arming alone so a merge the maintainer armed by hand is not
+        # silently undone by a slow review.
+        if: github.actor == 'jaryl' && steps.maintainer_review_gate.outputs.verdict == 'failed'
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token || secrets.AUTOLAND_PAT || secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+          armed=$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')
+          if [ "$armed" = "true" ]; then
+            gh pr merge --disable-auto "$PR_URL"
+            echo "::warning::Disarmed auto-merge on $PR_URL — the review of this head concluded failed."
+            echo "🛑 Auto-merge **disarmed**: the review of this head concluded failed." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Report the decision (never conclude green having done nothing)
         # The original failure mode was silence: when both enable steps were
