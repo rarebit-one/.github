@@ -34,6 +34,11 @@ name: Pin Check
 #      listener naming a missing workflow is not an error to GitHub: it simply
 #      never fires. A rename therefore severs the chain silently while every run
 #      stays green. Offline and repo-local — no API calls.
+#
+#   5. workflow validity (fifth) — fails on what GitHub itself rejects or cannot
+#      run: unparseable YAML, any `${{ }}`-bearing string over the 21,000-char
+#      expression limit, and services:/container: jobs whose runs-on resolves to
+#      the broker label (no docker daemon there). Each was a silent outage.
 # Consume from a PR workflow:
 #
 #   jobs:
@@ -578,3 +583,174 @@ jobs:
               sys.exit(main())
           WFRUN_CHECK_EOF
           python3 "${RUNNER_TEMP}/wfrun_check.py" .
+      # Fifth, and offline: things GitHub REJECTS (or a job cannot run) that the
+      # pinning checks above never look at. Each one has cost the estate a
+      # silent outage — a workflow that simply stops running while nothing goes
+      # red (the only trace is a `startup_failure` run named after the file path):
+      #   - YAML that does not parse (thesim-family/homelab-ops heyarr-bump.yml,
+      #     145 red pushes, the schedule never fired);
+      #   - an expression over 21,000 chars — a `${{ }}` anywhere in a string makes
+      #     the whole string ONE expression (sidekick-labs/core-platform-brain's
+      #     daily standup, silent 2026-09-14 → 09-24);
+      #   - services:/container: on a job routed to the broker label — broker
+      #     runners have no docker daemon (33 `docker: command not found` failures,
+      #     2026-08-31 → 09-22).
+      # vars are read from the CALLER's context (toJSON(vars)), so a
+      # `vars.RUNNER_LABEL || 'ubuntu-latest'` runs-on is judged by its real value.
+      - name: Workflow validity — parse, expression limit, services on the broker
+        if: steps.prep.outputs.paths != ''
+        env:
+          PATHS: ${{ steps.prep.outputs.paths }}
+          ALL_VARS: ${{ toJSON(vars) }}
+          BROKER_LABEL: jdb
+        run: |
+          set -euo pipefail
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --user --break-system-packages pyyaml
+          cat > "${RUNNER_TEMP}/wf_validity.py" <<'WF_VALIDITY_EOF'
+          #!/usr/bin/env python3
+          """Workflow-validity checks GitHub enforces (or that make a job unrunnable) but that
+          neither zizmor nor pinact catch:
+
+            1. YAML that does not parse          -> GitHub rejects the file; its triggers never fire.
+            2. An expression over 21,000 chars   -> GitHub rejects the file. An expression anywhere in a
+                                                    string makes the WHOLE string one expression.
+            3. services:/container: on a job whose runs-on resolves to the broker label
+                                                 -> the broker's Linux runners have no docker daemon;
+                                                    the job dies at "Set up job" (docker: command not found).
+
+          Only GitHub-consumed YAML is checked: files under a `.github/workflows/` directory and
+          action metadata (`action.yml` / `action.yaml`). Fixtures or tool config that happen to
+          live under `.github/actions/` are ignored. A file passed explicitly is always checked.
+
+          usage: wfcheck.py <path>...   (files or dirs; ALL_VARS env = toJSON(vars), BROKER_LABEL env)
+          Exit 1 on any error; warnings never fail.
+          """
+          import json, os, re, sys
+
+          import yaml
+
+          LIMIT = 21000
+          BROKER = os.environ.get("BROKER_LABEL", "jdb")
+          try:
+              VARS = json.loads(os.environ.get("ALL_VARS") or "{}") or {}
+          except ValueError:
+              VARS = {}
+          EXPR = re.compile(r"\$\{\{")
+          # Built at runtime: this file is embedded in a workflow `run:` block, where a
+          # literal dollar-brace-brace would itself be parsed as an expression.
+          MARK = "$" + "{" + "{ }" + "}"
+          VAR_REF = re.compile(r"vars\.([A-Za-z_][A-Za-z0-9_]*)")
+          INPUT_REF = re.compile(r"inputs\.([A-Za-z_][A-Za-z0-9_-]*)")
+
+
+          def consumed_by_github(path):
+              norm = path.replace(os.sep, "/")
+              if os.path.basename(norm) in ("action.yml", "action.yaml"):
+                  return True
+              return os.path.dirname(norm).endswith(".github/workflows")
+
+
+          def files(args):
+              for a in args:
+                  if os.path.isdir(a):
+                      for root, _, names in os.walk(a):
+                          for n in sorted(names):
+                              p = os.path.join(root, n)
+                              if n.endswith((".yml", ".yaml")) and consumed_by_github(p):
+                                  yield p
+                  elif a.endswith((".yml", ".yaml")) and os.path.exists(a):
+                      yield a
+
+
+          def strings(node, path=""):
+              if isinstance(node, dict):
+                  for k, v in node.items():
+                      yield from strings(v, f"{path}.{k}")
+              elif isinstance(node, list):
+                  for i, v in enumerate(node):
+                      yield from strings(v, f"{path}[{i}]")
+              elif isinstance(node, str):
+                  yield path, node
+
+
+          def names_broker(value):
+              return re.search(rf"(^|[^A-Za-z0-9_-]){re.escape(BROKER)}([^A-Za-z0-9_-]|$)", str(value)) is not None
+
+
+          def input_defaults(doc):
+              """workflow_call / workflow_dispatch input defaults. PyYAML reads the `on:` key as True."""
+              on = doc.get("on", doc.get(True)) or {}
+              out = {}
+              if isinstance(on, dict):
+                  for trig in ("workflow_call", "workflow_dispatch"):
+                      for name, spec in ((on.get(trig) or {}).get("inputs") or {}).items():
+                          if isinstance(spec, dict) and "default" in spec:
+                              out.setdefault(name, []).append(spec["default"])
+              return out
+
+
+          def runs_on_hits_broker(runs_on, defaults):
+              """True if runs-on names the broker label, or references a var or an input
+              default whose value does (a caller that accepts the default lands there)."""
+              text = json.dumps(runs_on) if not isinstance(runs_on, str) else runs_on
+              if names_broker(text):
+                  return True
+              for name in VAR_REF.findall(text):
+                  if name in VARS and names_broker(VARS[name]):
+                      return True
+              for name in INPUT_REF.findall(text):
+                  if any(names_broker(d) for d in defaults.get(name, [])):
+                      return True
+              return False
+
+
+          def main(argv):
+              errors = warnings = 0
+              for f in files(argv):
+                  try:
+                      with open(f, encoding="utf-8") as fh:
+                          doc = yaml.safe_load(fh)
+                  except yaml.YAMLError as e:
+                      mark = getattr(e, "problem_mark", None)
+                      where = f"{f}:{mark.line + 1}" if mark else f
+                      print(f"::error file={f}{',line=' + str(mark.line + 1) if mark else ''}::{where}: not valid YAML "
+                            f"({getattr(e, 'problem', e)}). GitHub rejects the file, so none of its triggers fire.")
+                      errors += 1
+                      continue
+                  if not isinstance(doc, dict):
+                      continue
+                  for path, s in strings(doc):
+                      if EXPR.search(s) and len(s) > LIMIT:
+                          print(f"::error file={f}::{f}: {path} is {len(s):,} chars and contains a `{MARK}`, so GitHub "
+                                f"evaluates it as ONE expression — over the {LIMIT:,}-char limit, which makes the whole "
+                                f"workflow invalid (it silently never starts). Move the interpolated value into `env:` "
+                                f"and reference it as an env var instead.")
+                          errors += 1
+                      elif EXPR.search(s) and len(s) > LIMIT * 0.9:
+                          print(f"::warning file={f}::{f}: {path} is {len(s):,} chars with a `{MARK}` — within 10% of "
+                                f"GitHub's {LIMIT:,}-char expression limit.")
+                          warnings += 1
+                  defaults = input_defaults(doc)
+                  jobs = doc.get("jobs") or {}
+                  if not isinstance(jobs, dict):
+                      continue
+                  for jid, job in jobs.items():
+                      if not isinstance(job, dict) or not (job.get("services") or job.get("container")):
+                          continue
+                      ro = job.get("runs-on")
+                      if ro is not None and runs_on_hits_broker(ro, defaults):
+                          what = "services:" if job.get("services") else "container:"
+                          print(f"::error file={f}::{f}: job `{jid}` declares {what} but its runs-on "
+                                f"({json.dumps(ro)}) can resolve to `{BROKER}`. Broker runners have no docker daemon, "
+                                f"so it fails at 'Set up job' with `docker: command not found`. Keep it on a hosted "
+                                f"label, or start the service in a step instead.")
+                          errors += 1
+              print(f"workflow validity: {errors} error(s), {warnings} warning(s)")
+              return 1 if errors else 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main(sys.argv[1:]))
+          WF_VALIDITY_EOF
+          # $PATHS is intentionally unquoted: space-separated, env-expanded only.
+          python3 "${RUNNER_TEMP}/wf_validity.py" $PATHS

@@ -39,6 +39,32 @@ config `.pinact.yaml`). Three pieces keep that compliant over time:
   `github.repository_owner` (`<owner>/*: ref-pin`, `*: hash-pin`), so it's
   portable to any org with no per-repo config.
 
+  Three more checks run in the same job, all blocking:
+
+  - **Pin integrity** resolves every third-party pin against the action's own
+    repository. A SHA-shaped ref to a commit that doesn't exist upstream passes
+    zizmor and pinact, then fails at run time. It warns, and does not block,
+    when the pin is an annotated tag object or its `# vX.Y.Z` label disagrees
+    with upstream.
+  - **Workflow-chain integrity** asserts every `workflow_run` listener names a
+    workflow that exists in the repo. GitHub silently never fires a listener
+    for a missing name, so a rename severs a deploy → triage chain while
+    everything stays green. Offline.
+  - **Workflow validity** (offline) covers what GitHub itself rejects or cannot
+    run, each of which was a silent outage (the only trace is a
+    `startup_failure` run named after the file):
+    - unparseable YAML;
+    - any expression-bearing string over GitHub's **21,000-char** expression
+      limit (an expression anywhere in a string makes the whole string one
+      expression). Strings within 10% of the limit get a warning.
+    - `services:`/`container:` on a job whose `runs-on` resolves to the broker
+      label `jdb`, which has no docker daemon. Resolution reads the caller's
+      `vars` and `workflow_call`/`workflow_dispatch` input defaults.
+
+    Only workflow files and `action.yml`/`action.yaml` are checked; other YAML
+    under `.github/actions` is ignored. It is pinned by
+    `tests/pin-check-workflow-validity.test.sh`.
+
   Consume it from a PR workflow (see `pin-check-caller.yml` here for the
   reference wiring):
 
