@@ -50,6 +50,9 @@ rec "$TMP/huge.json"    success false 9 $'x\nREVIEW-VERDICT: blocking=9999999999
 rec "$TMP/crash.json"   success true  1 ''
 rec "$TMP/failrec.json" error_during_execution true 3 ''
 python3 -c 'import json;json.dump([{"type":"system","subtype":"init"},{"type":"result","subtype":"success","is_error":False,"num_turns":9}],open("'"$TMP"'/nores.json","w"))'
+rec "$TMP/crlf.json"    success false 9 $'A bug.\r\nREVIEW-VERDICT: blocking=1 advisory=0\r\n\r\n'
+rec "$TMP/signoff.json" success false 9 $'A bug.\nREVIEW-VERDICT: blocking=1 advisory=0\n-- reviewer'
+rec "$TMP/bold.json"    success false 9 $'A bug.\n**REVIEW-VERDICT: blocking=1 advisory=0**'
 printf '[{"type":"system","subtype":"init"}]' > "$TMP/norecord.json"
 
 run 0 "0 blocking findings"      "clean review"                         success skipped skipped "$TMP/clean.json"
@@ -58,6 +61,9 @@ run 0 "no 'REVIEW-VERDICT"       "no verdict line: green + warning (under bash -
 run 0 "no 'REVIEW-VERDICT"       "verdict only quoted mid-text: treated as no line" success skipped skipped "$TMP/quoted.json"
 run 1 "BLOCKING finding"         "huge N is still > 0"                  success skipped skipped "$TMP/huge.json"
 run 0 "no 'REVIEW-VERDICT"       "result record without .result"        success skipped skipped "$TMP/nores.json"
+run 1 "1 BLOCKING finding"       "CRLF endings + trailing CRLF blank line still parse" success skipped skipped "$TMP/crlf.json"
+run 0 "no 'REVIEW-VERDICT"       "sign-off after the trailer: not the last line (fails open, warns)" success skipped skipped "$TMP/signoff.json"
+run 0 "no 'REVIEW-VERDICT"       "bold-wrapped trailer: not exact (fails open, warns)" success skipped skipped "$TMP/bold.json"
 run 0 "NO review ran"            "success with NO execution file (validation skip)" success skipped skipped ""
 run 0 "NO review ran"            "success, file has no result record"   success skipped skipped "$TMP/norecord.json"
 run 0 "NO review ran"            "success but the record is an error (earlier attempt's)" failure success skipped "$TMP/failrec.json"

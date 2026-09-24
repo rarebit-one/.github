@@ -303,14 +303,16 @@ jobs:
           # `REVIEW-VERDICT: blocking=N advisory=M`; prints nothing otherwise (no such
           # line, no result record, a non-string .result). Anchored to the last line so
           # a verdict quoted elsewhere in the review (or echoed after the trailer) can
-          # never be read as the verdict. ALWAYS returns 0: this step runs under
+          # never be read as the verdict. NOT an adversarial gate: a prompt injection
+          # that steers the model can still steer its own last line; this only
+          # removes accidental misreads. ALWAYS returns 0: this step runs under
           # `bash -e`, so a no-match must not abort it (that was a silent red).
           review_blocking() {
             local r
             r="$(last_result "$1" 2>/dev/null || true)"
             if [ -z "$r" ] || [ "$r" = "null" ]; then return 0; fi
             jq -r '.result // "" | strings' <<<"$r" 2>/dev/null \
-              | awk 'NF { last = $0 } END { print last }' \
+              | tr -d '\r' | awk 'NF { last = $0 } END { print last }' \
               | sed -nE 's/^[[:space:]]*REVIEW-VERDICT: blocking=([0-9]+) advisory=[0-9]+[[:space:]]*$/\1/p' || true
           }
           # A REVIEW RAN only if the last result record is a real success: a result
