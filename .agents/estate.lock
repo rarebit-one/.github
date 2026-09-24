@@ -9,3 +9,4 @@ sha = "a4eb76b26f17e08f0f3d7fd1b6ccd7f4da9c9b02"
 
 [vendored]
 "enforce-worktree" = "sha256:04ed414ecfddf7df00ddcabedbfeadbb7a77aac9fc13a28090427ae580a718f6"
+"enforce-worktree-bash" = "sha256:08c32b9e73244b6459b2b162c96869feb73b4cedba7cf97260a30e190769481d"
