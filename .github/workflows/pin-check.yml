@@ -605,7 +605,7 @@ jobs:
           BROKER_LABEL: jdb
         run: |
           set -euo pipefail
-          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --user pyyaml
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --user --break-system-packages pyyaml
           cat > "${RUNNER_TEMP}/wf_validity.py" <<'WF_VALIDITY_EOF'
           #!/usr/bin/env python3
           """Workflow-validity checks GitHub enforces (or that make a job unrunnable) but that
@@ -617,6 +617,10 @@ jobs:
             3. services:/container: on a job whose runs-on resolves to the broker label
                                                  -> the broker's Linux runners have no docker daemon;
                                                     the job dies at "Set up job" (docker: command not found).
+
+          Only GitHub-consumed YAML is checked: files under a `.github/workflows/` directory and
+          action metadata (`action.yml` / `action.yaml`). Fixtures or tool config that happen to
+          live under `.github/actions/` are ignored. A file passed explicitly is always checked.
 
           usage: wfcheck.py <path>...   (files or dirs; ALL_VARS env = toJSON(vars), BROKER_LABEL env)
           Exit 1 on any error; warnings never fail.
@@ -636,6 +640,14 @@ jobs:
           # literal dollar-brace-brace would itself be parsed as an expression.
           MARK = "$" + "{" + "{ }" + "}"
           VAR_REF = re.compile(r"vars\.([A-Za-z_][A-Za-z0-9_]*)")
+          INPUT_REF = re.compile(r"inputs\.([A-Za-z_][A-Za-z0-9_-]*)")
+
+
+          def consumed_by_github(path):
+              norm = path.replace(os.sep, "/")
+              if os.path.basename(norm) in ("action.yml", "action.yaml"):
+                  return True
+              return os.path.dirname(norm).endswith(".github/workflows")
 
 
           def files(args):
@@ -643,8 +655,9 @@ jobs:
                   if os.path.isdir(a):
                       for root, _, names in os.walk(a):
                           for n in sorted(names):
-                              if n.endswith((".yml", ".yaml")):
-                                  yield os.path.join(root, n)
+                              p = os.path.join(root, n)
+                              if n.endswith((".yml", ".yaml")) and consumed_by_github(p):
+                                  yield p
                   elif a.endswith((".yml", ".yaml")) and os.path.exists(a):
                       yield a
 
@@ -660,14 +673,33 @@ jobs:
                   yield path, node
 
 
-          def runs_on_hits_broker(runs_on):
-              """True if runs-on names the broker label, or references a var whose value does."""
+          def names_broker(value):
+              return re.search(rf"(^|[^A-Za-z0-9_-]){re.escape(BROKER)}([^A-Za-z0-9_-]|$)", str(value)) is not None
+
+
+          def input_defaults(doc):
+              """workflow_call / workflow_dispatch input defaults. PyYAML reads the `on:` key as True."""
+              on = doc.get("on", doc.get(True)) or {}
+              out = {}
+              if isinstance(on, dict):
+                  for trig in ("workflow_call", "workflow_dispatch"):
+                      for name, spec in ((on.get(trig) or {}).get("inputs") or {}).items():
+                          if isinstance(spec, dict) and "default" in spec:
+                              out.setdefault(name, []).append(spec["default"])
+              return out
+
+
+          def runs_on_hits_broker(runs_on, defaults):
+              """True if runs-on names the broker label, or references a var or an input
+              default whose value does (a caller that accepts the default lands there)."""
               text = json.dumps(runs_on) if not isinstance(runs_on, str) else runs_on
-              if re.search(rf"(^|[^A-Za-z0-9_-]){re.escape(BROKER)}([^A-Za-z0-9_-]|$)", text):
+              if names_broker(text):
                   return True
               for name in VAR_REF.findall(text):
-                  val = VARS.get(name)
-                  if val is not None and re.search(rf"(^|[^A-Za-z0-9_-]){re.escape(BROKER)}([^A-Za-z0-9_-]|$)", str(val)):
+                  if name in VARS and names_broker(VARS[name]):
+                      return True
+              for name in INPUT_REF.findall(text):
+                  if any(names_broker(d) for d in defaults.get(name, [])):
                       return True
               return False
 
@@ -676,7 +708,8 @@ jobs:
               errors = warnings = 0
               for f in files(argv):
                   try:
-                      doc = yaml.safe_load(open(f, encoding="utf-8"))
+                      with open(f, encoding="utf-8") as fh:
+                          doc = yaml.safe_load(fh)
                   except yaml.YAMLError as e:
                       mark = getattr(e, "problem_mark", None)
                       where = f"{f}:{mark.line + 1}" if mark else f
@@ -697,6 +730,7 @@ jobs:
                           print(f"::warning file={f}::{f}: {path} is {len(s):,} chars with a `{MARK}` — within 10% of "
                                 f"GitHub's {LIMIT:,}-char expression limit.")
                           warnings += 1
+                  defaults = input_defaults(doc)
                   jobs = doc.get("jobs") or {}
                   if not isinstance(jobs, dict):
                       continue
@@ -704,7 +738,7 @@ jobs:
                       if not isinstance(job, dict) or not (job.get("services") or job.get("container")):
                           continue
                       ro = job.get("runs-on")
-                      if ro is not None and runs_on_hits_broker(ro):
+                      if ro is not None and runs_on_hits_broker(ro, defaults):
                           what = "services:" if job.get("services") else "container:"
                           print(f"::error file={f}::{f}: job `{jid}` declares {what} but its runs-on "
                                 f"({json.dumps(ro)}) can resolve to `{BROKER}`. Broker runners have no docker daemon, "
