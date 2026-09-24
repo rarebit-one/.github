@@ -42,3 +42,4 @@ jobs:
       # check, workflow validity (pin-check.yml).
       - run: bash tests/maintainer-review-gate.test.sh
       - run: bash tests/pin-check-workflow-validity.test.sh
+      - run: bash tests/review-blocking-verdict.test.sh
