@@ -60,11 +60,12 @@ env:
     Classify every finding as BLOCKING or ADVISORY. A BLOCKING finding must be
     fixed before this PR merges: a correctness bug, a security issue, a broken
     invariant, data loss, or a regression. Everything else (style, naming,
-    nits, suggestions, "consider adding a test") is ADVISORY. Label each finding
-    in your comment accordingly.
+    nits, suggestions, "consider adding a test") is ADVISORY. Only count issues
+    this PR introduces or makes worse, not pre-existing ones. If unsure, mark it
+    ADVISORY. Label each finding in your comment accordingly.
 
-    End BOTH your PR comment AND your final message with exactly one line, and
-    nothing after it:
+    End BOTH your PR comment AND your final message with exactly this line as
+    the very last line, with nothing after it:
     REVIEW-VERDICT: blocking=<number of BLOCKING findings> advisory=<number of ADVISORY findings>
     Automation reads that line: blocking > 0 turns this check red and holds
     auto-merge until a new push is reviewed clean.
@@ -228,8 +229,10 @@ jobs:
       # 🔴 THE step that owns this job's result. Every attempt above is
       # continue-on-error, so without this the job would go GREEN whenever the
       # retry chain stops early — which it deliberately does when a failure was
-      # too expensive to be the known transient blip. A skipped attempt has
-      # outcome `skipped`, never `success`, so only a real success clears this.
+      # too expensive to be the known transient blip. An attempt's action
+      # `success` is judged here too: blocking findings in the REVIEW-VERDICT
+      # trailer turn it red; a success with no result (the action skipped itself)
+      # is logged as "No review ran". Pinned by tests/review-verdict-step.test.sh.
       - name: Review verdict
         if: always() && steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]'
         env:
@@ -296,17 +299,29 @@ jobs:
           }
           # ── is_known_bug: end ──
           # ── review_blocking: begin (tests/review-blocking-verdict.test.sh extracts this block) ──
-          # Prints N from the LAST `REVIEW-VERDICT: blocking=N ...` line in the final
-          # result text of the execution file; prints nothing when there is no such
-          # line (or no result record). Depends on last_result above.
+          # Prints N when the LAST NON-EMPTY line of the final result text is exactly
+          # `REVIEW-VERDICT: blocking=N advisory=M`; prints nothing otherwise (no such
+          # line, no result record, a non-string .result). Anchored to the last line so
+          # a verdict quoted elsewhere in the review (or echoed after the trailer) can
+          # never be read as the verdict. ALWAYS returns 0: this step runs under
+          # `bash -e`, so a no-match must not abort it (that was a silent red).
           review_blocking() {
+            local r
             r="$(last_result "$1" 2>/dev/null || true)"
             if [ -z "$r" ] || [ "$r" = "null" ]; then return 0; fi
-            jq -r '.result // ""' <<<"$r" | grep -oE 'REVIEW-VERDICT: blocking=[0-9]+' | tail -1 | sed 's/.*blocking=//'
+            jq -r '.result // "" | strings' <<<"$r" 2>/dev/null \
+              | awk 'NF { last = $0 } END { print last }' \
+              | sed -nE 's/^[[:space:]]*REVIEW-VERDICT: blocking=([0-9]+) advisory=[0-9]+[[:space:]]*$/\1/p' || true
           }
+          # A REVIEW RAN only if the last result record is a real success: a result
+          # record with subtype "success" and is_error false. (A later skipped attempt
+          # can leave an earlier failed attempt's record in the shared file.)
           has_result() {
+            local r
             r="$(last_result "$1" 2>/dev/null || true)"
-            [ -n "$r" ] && [ "$r" != "null" ]
+            [ -n "$r" ] && [ "$r" != "null" ] || return 1
+            [ "$(jq -r '.subtype // ""' <<<"$r" 2>/dev/null)" = "success" ] || return 1
+            [ "$(jq -r '.is_error // false' <<<"$r" 2>/dev/null)" = "false" ] || return 1
           }
           # ── review_blocking: end ──
           RT="${RUNNER_TEMP:-/tmp}/claude-execution-output.json"
@@ -325,12 +340,15 @@ jobs:
               { echo "### :warning: No review ran"; echo; echo "The review action reported success without producing a result — most likely a workflow-validation skip (this PR edits the review caller). **Treat this PR as unreviewed** (rarebit-sre#374)."; } >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
-            n="$(review_blocking "$EF")"
+            echo "verdict: result record — $(jq -c '{subtype, is_error, num_turns, total_cost_usd}' <<<"$(last_result "$EF" 2>/dev/null || true)" 2>/dev/null || echo unreadable)"
+            n="$(review_blocking "$EF" || true)"
             if [ -z "$n" ]; then
               echo "::warning::Claude Code Review ran, but its final message has no 'REVIEW-VERDICT: blocking=N advisory=M' line — not gating on findings for this run (log-only)."
               exit 0
             fi
-            if [ "$n" -gt 0 ]; then
+            # String test, not -gt: a huge N overflows `[ -gt ]` into an error that
+            # would read as "not > 0". Any non-zero digit means at least one.
+            if [[ "$n" == *[1-9]* ]]; then
               echo "::error::Claude Code Review raised $n BLOCKING finding(s). Fix them and push (the next review re-evaluates), or refute them in a PR comment and have a human merge."
               echo "### :x: Claude Code Review: $n blocking finding(s) — auto-merge held" >> "$GITHUB_STEP_SUMMARY"
               exit 1

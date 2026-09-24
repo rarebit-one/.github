@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Pins the success-path judgement in .github/workflows/claude-code-review.yml:
-#   - review_blocking: BLOCKING count from the LAST `REVIEW-VERDICT: blocking=N`
-#     line of the final result text (blocking > 0 turns the check red);
+#   - review_blocking: BLOCKING count from the `REVIEW-VERDICT: blocking=N advisory=M`
+#     trailer, which must be the LAST NON-EMPTY line of the final result text;
 #   - has_result: an action "success" with no result record means NO review ran
 #     (the workflow-validation skip, rarebit-sre#374).
 # Both are extracted verbatim from the workflow (with last_result, which lives
@@ -41,6 +41,10 @@ mk "$TMP/clean.json" $'All good.\nREVIEW-VERDICT: blocking=0 advisory=2'
 mk "$TMP/block.json" $'A bug.\nREVIEW-VERDICT: blocking=3 advisory=0'
 mk "$TMP/noline.json" $'A review without the trailer.'
 mk "$TMP/last.json" $'Quoting an old REVIEW-VERDICT: blocking=5 line.\nREVIEW-VERDICT: blocking=0 advisory=1'
+mk "$TMP/quoted.json" $'A review that quotes REVIEW-VERDICT: blocking=3 advisory=0 mid-text\nbut has no trailer.'
+mk "$TMP/echoafter.json" $'Bug.\nREVIEW-VERDICT: blocking=2 advisory=0\n```\nREVIEW-VERDICT: blocking=0 advisory=0\n```'
+mk "$TMP/trailing.json" $'Fine.\nREVIEW-VERDICT: blocking=0 advisory=0\n\n   \n'
+mk "$TMP/huge.json" $'x\nREVIEW-VERDICT: blocking=99999999999999999999 advisory=0'
 printf '%s\n' '{"type":"system","subtype":"init"}' '{"type":"result","subtype":"success","is_error":false,"result":"x\nREVIEW-VERDICT: blocking=1 advisory=0"}' > "$TMP/jsonl.json"
 printf '[{"type":"system","subtype":"init"}]' > "$TMP/noresult.json"
 printf '{not json' > "$TMP/garbage.json"
@@ -52,6 +56,10 @@ blocking_is "" "no REVIEW-VERDICT line"                "$TMP/noline.json"
 blocking_is 0  "the LAST verdict line wins"            "$TMP/last.json"
 blocking_is 1  "JSONL execution file"                  "$TMP/jsonl.json"
 blocking_is "" "no result record"                      "$TMP/noresult.json"
+blocking_is "" "verdict only quoted mid-text (not the last line)" "$TMP/quoted.json"
+blocking_is "" "verdict echoed after the trailer (last line is a fence)" "$TMP/echoafter.json"
+blocking_is 0  "trailing blank lines after the trailer"  "$TMP/trailing.json"
+blocking_is 99999999999999999999 "huge N is passed through verbatim" "$TMP/huge.json"
 
 has_result "$TMP/clean.json"    && ok "has_result: real review"        || bad "has_result: real review"
 has_result "$TMP/noresult.json" && bad "has_result: no result record"   || ok "has_result: no result record → no review ran"
