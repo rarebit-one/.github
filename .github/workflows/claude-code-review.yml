@@ -12,6 +12,14 @@ on:
           callers pass their homelab label (e.g. `hyperion`).
         type: string
         default: 'ubuntu-latest'
+      allowed-bots:
+        description: >-
+          Comma-separated bot logins the review may run for (the PR event's
+          GITHUB_ACTOR). Default covers the org App (rarebit-one[bot]) and
+          claude[bot], the only non-Dependabot bot actors observed; Dependabot
+          PRs are step-gated out. This repo is PUBLIC — never pass '*'.
+        type: string
+        default: 'rarebit-one,claude'
 
 env:
   # Single source of truth for the Claude model across this repo's Claude
@@ -117,7 +125,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
-          allowed_bots: '*'
+          allowed_bots: ${{ inputs.allowed-bots }}
           prompt: ${{ env.REVIEW_PROMPT }}
           claude_args: '--model ${{ env.CLAUDE_MODEL }} ${{ env.CLAUDE_TOOL_ARGS }}'
 
@@ -159,7 +167,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
-          allowed_bots: '*'
+          allowed_bots: ${{ inputs.allowed-bots }}
           prompt: ${{ env.REVIEW_PROMPT }}
           claude_args: '--model ${{ env.CLAUDE_MODEL }} ${{ env.CLAUDE_TOOL_ARGS }}'
 
@@ -201,7 +209,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
-          allowed_bots: '*'
+          allowed_bots: ${{ inputs.allowed-bots }}
           prompt: ${{ env.REVIEW_PROMPT }}
           claude_args: '--model ${{ env.CLAUDE_MODEL }} ${{ env.CLAUDE_TOOL_ARGS }}'
 
