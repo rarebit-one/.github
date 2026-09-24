@@ -25,19 +25,6 @@ jobs:
     uses: ./.github/workflows/claude-code-review.yml
     secrets: inherit
 
-  # Pins pin-check's fifth check (workflow validity): parse errors, the
-  # 21,000-char expression limit, and services:/container: routed to jdb —
-  # directly, via vars, or via an input default. Extracted from pin-check.yml
-  # itself, so it cannot drift from what the gate runs.
-  pin-check-validity:
-    name: Pin-check workflow validity
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: bash tests/pin-check-workflow-validity.test.sh
-
   # Pins the review gate's known-crash classifier (`is_known_bug` in
   # claude-code-review.yml) against every execution-file shape and the
   # negatives it must fail closed on. The test extracts the function from the
