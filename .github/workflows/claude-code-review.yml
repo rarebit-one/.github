@@ -57,6 +57,19 @@ env:
 
     Use `gh pr comment` with your Bash tool to leave your review as a comment on the PR.
 
+    Classify every finding as BLOCKING or ADVISORY. A BLOCKING finding must be
+    fixed before this PR merges: a correctness bug, a security issue, a broken
+    invariant, data loss, or a regression. Everything else (style, naming,
+    nits, suggestions, "consider adding a test") is ADVISORY. Only count issues
+    this PR introduces or makes worse, not pre-existing ones. If unsure, mark it
+    ADVISORY. Label each finding in your comment accordingly.
+
+    End BOTH your PR comment AND your final message with exactly this line as
+    the very last line, with nothing after it:
+    REVIEW-VERDICT: blocking=<number of BLOCKING findings> advisory=<number of ADVISORY findings>
+    Automation reads that line: blocking > 0 turns this check red and holds
+    auto-merge until a new push is reviewed clean.
+
 jobs:
   claude_review:
     name: Claude Code Review
@@ -216,8 +229,10 @@ jobs:
       # 🔴 THE step that owns this job's result. Every attempt above is
       # continue-on-error, so without this the job would go GREEN whenever the
       # retry chain stops early — which it deliberately does when a failure was
-      # too expensive to be the known transient blip. A skipped attempt has
-      # outcome `skipped`, never `success`, so only a real success clears this.
+      # too expensive to be the known transient blip. An attempt's action
+      # `success` is judged here too: blocking findings in the REVIEW-VERDICT
+      # trailer turn it red; a success with no result (the action skipped itself)
+      # is logged as "No review ran". Pinned by tests/review-verdict-step.test.sh.
       - name: Review verdict
         if: always() && steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]'
         env:
@@ -232,12 +247,12 @@ jobs:
           EF3: ${{ steps.review_3.outputs.execution_file }}
         run: |
           set -uo pipefail
-          # A real success on ANY attempt clears the gate.
+          # An attempt's action SUCCESS is not yet a verdict: the action also exits 0
+          # when it skips itself without reviewing, and a real review may have raised
+          # BLOCKING findings. Both are judged below, once the execution file is found.
+          SUCCEEDED=0
           for o in "$O1" "$O2" "$O3"; do
-            if [ "$o" = "success" ]; then
-              echo "Claude Code Review succeeded (attempt outcomes: $O1 / $O2 / $O3)."
-              exit 0
-            fi
+            if [ "$o" = "success" ]; then SUCCEEDED=1; fi
           done
 
           # ── TEMPORARY known-upstream-bug tolerance (2026-08-31) ────────────────
@@ -283,12 +298,66 @@ jobs:
             return 0
           }
           # ── is_known_bug: end ──
+          # ── review_blocking: begin (tests/review-blocking-verdict.test.sh extracts this block) ──
+          # Prints N when the LAST NON-EMPTY line of the final result text is exactly
+          # `REVIEW-VERDICT: blocking=N advisory=M`; prints nothing otherwise (no such
+          # line, no result record, a non-string .result). Anchored to the last line so
+          # a verdict quoted elsewhere in the review (or echoed after the trailer) can
+          # never be read as the verdict. NOT an adversarial gate: a prompt injection
+          # that steers the model can still steer its own last line; this only
+          # removes accidental misreads. ALWAYS returns 0: this step runs under
+          # `bash -e`, so a no-match must not abort it (that was a silent red).
+          review_blocking() {
+            local r
+            r="$(last_result "$1" 2>/dev/null || true)"
+            if [ -z "$r" ] || [ "$r" = "null" ]; then return 0; fi
+            jq -r '.result // "" | strings' <<<"$r" 2>/dev/null \
+              | tr -d '\r' | awk 'NF { last = $0 } END { print last }' \
+              | sed -nE 's/^[[:space:]]*REVIEW-VERDICT: blocking=([0-9]+) advisory=[0-9]+[[:space:]]*$/\1/p' || true
+          }
+          # A REVIEW RAN only if the last result record is a real success: a result
+          # record with subtype "success" and is_error false. (A later skipped attempt
+          # can leave an earlier failed attempt's record in the shared file.)
+          has_result() {
+            local r
+            r="$(last_result "$1" 2>/dev/null || true)"
+            [ -n "$r" ] && [ "$r" != "null" ] || return 1
+            [ "$(jq -r '.subtype // ""' <<<"$r" 2>/dev/null)" = "success" ] || return 1
+            [ "$(jq -r '.is_error // false' <<<"$r" 2>/dev/null)" = "false" ] || return 1
+          }
+          # ── review_blocking: end ──
           RT="${RUNNER_TEMP:-/tmp}/claude-execution-output.json"
           EF=""
           for cand in "$EF3" "$EF2" "$EF1" "$RT"; do
             if [ -n "$cand" ] && [ -f "$cand" ]; then EF="$cand"; break; fi
           done
           echo "verdict: attempt outcomes $O1 / $O2 / $O3; execution_file outputs: [${EF1:-}] [${EF2:-}] [${EF3:-}]; reading: ${EF:-<none found, RUNNER_TEMP=${RUNNER_TEMP:-unset}>}"
+          if [ "$SUCCEEDED" = 1 ]; then
+            # No result means NO REVIEW RAN. claude-code-action exits 0 when it skips
+            # itself, e.g. its workflow-validation skip on a PR that edits the workflow
+            # invoking it (rarebit-sre#374). STAGE 1 is log-only: loud, not red, until
+            # enough runs confirm a real success always leaves a result here.
+            if [ -z "$EF" ] || ! has_result "$EF"; then
+              echo "::warning::Claude Code Review reported success but produced no review result — the action most likely SKIPPED itself (e.g. a workflow-validation skip because this PR edits the workflow that invokes it; rarebit-sre#374). NO review ran: treat this PR as unreviewed. (Log-only for now.)"
+              { echo "### :warning: No review ran"; echo; echo "The review action reported success without producing a result — most likely a workflow-validation skip (this PR edits the review caller). **Treat this PR as unreviewed** (rarebit-sre#374)."; } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "verdict: result record — $(jq -c '{subtype, is_error, num_turns, total_cost_usd}' <<<"$(last_result "$EF" 2>/dev/null || true)" 2>/dev/null || echo unreadable)"
+            n="$(review_blocking "$EF" || true)"
+            if [ -z "$n" ]; then
+              echo "::warning::Claude Code Review ran, but its final message has no 'REVIEW-VERDICT: blocking=N advisory=M' line — not gating on findings for this run (log-only)."
+              exit 0
+            fi
+            # String test, not -gt: a huge N overflows `[ -gt ]` into an error that
+            # would read as "not > 0". Any non-zero digit means at least one.
+            if [[ "$n" == *[1-9]* ]]; then
+              echo "::error::Claude Code Review raised $n BLOCKING finding(s). Fix them and push (the next review re-evaluates), or refute them in a PR comment and have a human merge."
+              echo "### :x: Claude Code Review: $n blocking finding(s) — auto-merge held" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            echo "Claude Code Review succeeded with 0 blocking findings (attempt outcomes: $O1 / $O2 / $O3)."
+            exit 0
+          fi
           if [ -n "$EF" ] && is_known_bug "$EF"; then
             echo "::warning::Claude Code Review CLI crashed on the known 2026-08-31 upstream bug (subtype=success + is_error=true, 0 turns, \$0 — the 'directory mismatch … tsconfig.json' Bun regression). NOT a security bypass and NOT a token/outage failure; passing the gate so the flake does not block merges."
             {
