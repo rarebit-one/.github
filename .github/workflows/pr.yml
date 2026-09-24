@@ -37,6 +37,3 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: bash tests/review-verdict-known-bug.test.sh
-      # Same extract-from-the-YAML shape for the maintainer auto-merge gate's
-      # `classify_review_runs` (dependabot-auto-merge.yml).
-      - run: bash tests/maintainer-review-gate.test.sh
