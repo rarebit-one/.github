@@ -25,10 +25,12 @@ jobs:
     uses: ./.github/workflows/claude-code-review.yml
     secrets: inherit
 
-  # Pins the review gate's known-crash classifier (`is_known_bug` in
-  # claude-code-review.yml) against every execution-file shape and the
-  # negatives it must fail closed on. The test extracts the function from the
-  # workflow YAML itself, so it cannot drift from what actually runs.
+  # Pins the gate logic that decides merges, each test extracting its code from
+  # the workflow YAML itself so it cannot drift from what actually runs:
+  # the review's known-crash classifier and its REVIEW-VERDICT parse
+  # (claude-code-review.yml), the whole "Review verdict" step run under
+  # `bash -e` as Actions does, the maintainer auto-merge gate
+  # (dependabot-auto-merge.yml) and pin-check's workflow-validity check.
   verdict-classifier:
     name: Review verdict classifier
     runs-on: ubuntu-latest
@@ -37,3 +39,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: bash tests/review-verdict-known-bug.test.sh
+      # Same extract-from-the-YAML shape: the maintainer auto-merge gate's
+      # `classify_review_runs` (dependabot-auto-merge.yml) and pin-check's fifth
+      # check, workflow validity (pin-check.yml).
+      - run: bash tests/maintainer-review-gate.test.sh
+      - run: bash tests/pin-check-workflow-validity.test.sh
+      - run: bash tests/review-blocking-verdict.test.sh
+      - run: bash tests/review-verdict-step.test.sh
