@@ -232,7 +232,8 @@ jobs:
       # too expensive to be the known transient blip. An attempt's action
       # `success` is judged here too: blocking findings in the REVIEW-VERDICT
       # trailer turn it red; a success with no result (the action skipped itself)
-      # is logged as "No review ran". Pinned by tests/review-verdict-step.test.sh.
+      # FAILS CLOSED as "No review ran" (rarebit-sre#374 stage 2). Pinned by
+      # tests/review-verdict-step.test.sh.
       - name: Review verdict
         if: always() && steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]'
         env:
@@ -342,7 +343,7 @@ jobs:
             # Dependabot PRs never reach this step (the review steps are gated off
             # them), so this only reds PRs a human or an engine wrote.
             if [ -z "$EF" ] || ! has_result "$EF"; then
-              echo "::error::Claude Code Review reported success but produced no review result — the action SKIPPED itself (most likely a workflow-validation skip because this PR edits the workflow that invokes it; rarebit-sre#374). NO review ran, so this gate fails closed: have a human review the diff and merge."
+              echo "::error::Claude Code Review reported success but produced no review result — the action SKIPPED itself (most likely a workflow-validation skip because this PR edits the workflow that invokes it; rarebit-sre#374). NO review ran, so this gate fails closed. Re-running will not help: the skip repeats until the edited caller is on the default branch (it also fires when a repo is first onboarded, before its caller exists on the default branch). Have a human review the diff and merge; where this check is REQUIRED with no bypass, that needs a maintainer to relax the ruleset for the merge."
               { echo "### :x: No review ran — human review required"; echo; echo "The review action reported success without producing a result — most likely a workflow-validation skip (this PR edits the review caller). **This PR is unreviewed**: a human must review and merge it (rarebit-sre#374)."; } >> "$GITHUB_STEP_SUMMARY"
               exit 1
             fi
