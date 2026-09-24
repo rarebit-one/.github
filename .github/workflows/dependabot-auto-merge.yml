@@ -410,6 +410,37 @@ jobs:
           fi
           echo "auto-merge queued (or already merged) on $PR_URL" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Disarm any earlier auto-merge — maintainer PR
+        # GitHub keeps auto-merge armed across new pushes, and the review this
+        # job gates on is NOT a required check. So if an earlier head armed
+        # auto-merge, a new head would land as soon as its REQUIRED checks pass
+        # — typically well inside the review gate's poll window (up to
+        # maintainer-review-timeout-seconds) — before its review concludes.
+        # Disarm FIRST; the enable step below re-arms only on a fresh `clean`
+        # verdict for THIS head. Consequence, stated: on `failed` or `unknown`
+        # the PR stays disarmed, including an arming the maintainer set by hand
+        # — re-arm it by hand after reading the review.
+        id: maintainer_disarm
+        if: github.actor == 'jaryl'
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token || secrets.AUTOLAND_PAT || secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          # Deliberately NOT `set -e`: a blip here must be loud, not a red job.
+          set -uo pipefail
+          armed=$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null' 2>/dev/null || echo unknown)
+          case "$armed" in
+            true)
+              if gh pr merge --disable-auto "$PR_URL"; then
+                echo "disarmed=true" >> "$GITHUB_OUTPUT"
+                echo "Auto-merge from an earlier head was **disarmed** pending this head's review." >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "::warning::Could not disarm the existing auto-merge on $PR_URL — an earlier arming may land this head before its review concludes."
+              fi ;;
+            false) : ;;
+            *) echo "::warning::Could not read auto-merge state for $PR_URL — if an earlier head armed it, this head may land before its review concludes." ;;
+          esac
+
       - name: Require the review to have concluded — maintainer PR
         id: maintainer_review_gate
         if: github.actor == 'jaryl'
@@ -465,6 +496,41 @@ jobs:
             exit 0
           fi
 
+          # classify_review_runs: begin
+          # Reads "<status>\t<conclusion>\t<name>" lines (one per matching check
+          # run) on stdin and prints exactly one of:
+          #   wait               nothing decisive yet: no runs, only
+          #                      skipped/neutral/stale runs, or any run still
+          #                      in flight
+          #   failed<TAB><line>  every decisive run completed and one failed
+          #   clean<TAB><line>   every decisive run completed and none failed
+          #
+          # SKIPPED / NEUTRAL / STALE ARE NOT A VERDICT. A run that concluded
+          # `skipped` (e.g. the draft-phase run before `ready_for_review`),
+          # `neutral` or `stale` says nothing about the code. Counting it as
+          # "completed and not failed" read as clean: rarebit-sre#330 merged at
+          # 08:10:32 on a skipped draft-phase run while the real review ran
+          # 08:10:33–08:13:54.
+          #
+          # FIELD-SPLIT WITH awk -F'\t', NOT `grep -E '\t'`: GNU grep -E does not
+          # expand `\t` (it matches a literal `t`), BSD grep does — which once
+          # made the failure branch unmatchable on Linux runners and turned this
+          # gate into a rubber stamp.
+          classify_review_runs() {
+            awk -F'\t' '
+              NF == 0 { next }
+              $1 == "completed" && ($2 == "skipped" || $2 == "neutral" || $2 == "stale") { next }
+              { n++; if (n == 1) first = $0 }
+              $1 != "completed" { running = 1 }
+              $1 == "completed" && ($2 == "failure" || $2 == "timed_out" || $2 == "cancelled" || $2 == "action_required") && bad == "" { bad = $0 }
+              END {
+                if (n == 0 || running) { print "wait"; exit }
+                if (bad != "") { print "failed\t" bad; exit }
+                print "clean\t" first
+              }'
+          }
+          # classify_review_runs: end
+
           deadline=$(( $(date +%s) + TIMEOUT_S ))
           verdict=unknown
           detail="no check named '$CHECK_NAME' appeared for $HEAD_SHA"
@@ -494,59 +560,22 @@ jobs:
                                     or (.name | endswith("/ " + env.CHECK_NAME)))
                            | "\(.status)\t\(.conclusion // "-")\t\(.name)"' 2>/dev/null || true)
 
-            # SKIPPED / NEUTRAL / STALE ARE NOT A VERDICT.
-            #
-            # A review run that concluded `skipped` (e.g. the draft-phase run
-            # before `ready_for_review`), `neutral` or `stale` says nothing about
-            # the code. Counting it as "completed and not failed" read as clean:
-            # rarebit-sre#330 merged at 08:10:32 on a skipped draft-phase run
-            # while the real review ran 08:10:33–08:13:54. Drop those rows and
-            # keep waiting for a run that actually concluded; if none arrives
-            # before the deadline the gate lands on `unknown` and holds.
-            runs=$(printf '%s\n' "$runs" | awk -F'\t' 'NF && !($1 == "completed" && ($2 == "skipped" || $2 == "neutral" || $2 == "stale"))')
-
-            if [ -n "$runs" ]; then
-              # FIELD-SPLIT WITH awk, NOT `grep -E '\t'`.
-              #
-              # `jq`'s "\t" emits a real tab (0x09), but GNU grep's -E does NOT
-              # expand the two-character escape `\t` — it matches a literal `t`.
-              # BSD grep on macOS does, so this is the worst shape of bug: it
-              # passes when a maintainer tries it locally and fails on the
-              # Ubuntu/self-hosted runner where it actually runs.
-              #
-              # Its consequence was this PR's own incident, reproduced inside
-              # the fix: the failure branch could never match, so `verdict` was
-              # assigned `clean` unconditionally for ANY completed run — a gate
-              # that rubber-stamps every review as passing. awk's -F is
-              # unambiguous on every platform, so the class of bug goes away
-              # rather than being fixed once.
-              incomplete=$(printf '%s\n' "$runs" | awk -F'\t' '$1 != "completed"' | head -1)
-              if [ -n "$incomplete" ]; then
-                : # still in flight — keep waiting
-              else
-                # Report the conclusion that DROVE the classification, not
-                # whichever line happened to sort first — on a repo with re-run
-                # history for the same check name those differ, and a summary
-                # that disagrees with the decision is worse than no summary.
-                driving=$(printf '%s\n' "$runs" | awk -F'\t' '
-                  $1 == "completed" && ($2 == "failure" || $2 == "timed_out" ||
-                                        $2 == "cancelled" || $2 == "action_required")' | head -1)
-                if [ -n "$driving" ]; then
-                  verdict=failed
-                else
-                  verdict=clean
-                  driving=$(printf '%s\n' "$runs" | head -1)
-                fi
-                detail="$(printf '%s' "$driving" | cut -f3) concluded $(printf '%s' "$driving" | cut -f2)"
-                break
-              fi
+            # Classification lives in classify_review_runs (above), pinned by
+            # tests/maintainer-review-gate.test.sh.
+            result=$(printf '%s\n' "$runs" | classify_review_runs)
+            class=${result%%$'\t'*}
+            if [ "$class" = clean ] || [ "$class" = failed ]; then
+              verdict=$class
+              driving=${result#*$'\t'}
+              detail="$(printf '%s' "$driving" | cut -f3) concluded $(printf '%s' "$driving" | cut -f2)"
+              break
             fi
 
             if [ "$(date +%s)" -ge "$deadline" ]; then
-              if [ -n "$runs" ]; then
+              if printf '%s\n' "$runs" | awk -F'\t' 'NF && $1 != "completed" { f = 1 } END { exit !f }'; then
                 detail="'$CHECK_NAME' was still running after ${TIMEOUT_S}s"
-              else
-                detail="no concluded (non-skipped) '$CHECK_NAME' run for $HEAD_SHA after ${TIMEOUT_S}s"
+              elif [ -n "$runs" ]; then
+                detail="only skipped/neutral/stale '$CHECK_NAME' runs for $HEAD_SHA after ${TIMEOUT_S}s — no review concluded"
               fi
               break
             fi
@@ -600,26 +629,6 @@ jobs:
             exit 1
           fi
           echo "auto-merge queued (or already merged) on $PR_URL" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Disarm auto-merge — maintainer PR whose review failed
-        # GitHub keeps auto-merge armed across new pushes. Without this, a PR
-        # armed on an earlier head stays armed when the review of a LATER head
-        # concludes red, and lands anyway once required checks pass. Only a
-        # concluded `failed` disarms: `unknown` (review slow or absent) leaves
-        # any arming alone so a merge the maintainer armed by hand is not
-        # silently undone by a slow review.
-        if: github.actor == 'jaryl' && steps.maintainer_review_gate.outputs.verdict == 'failed'
-        env:
-          GH_TOKEN: ${{ steps.app_token.outputs.token || secrets.AUTOLAND_PAT || secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: |
-          set -euo pipefail
-          armed=$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')
-          if [ "$armed" = "true" ]; then
-            gh pr merge --disable-auto "$PR_URL"
-            echo "::warning::Disarmed auto-merge on $PR_URL — the review of this head concluded failed."
-            echo "🛑 Auto-merge **disarmed**: the review of this head concluded failed." >> "$GITHUB_STEP_SUMMARY"
-          fi
 
       - name: Report the decision (never conclude green having done nothing)
         # The original failure mode was silence: when both enable steps were
