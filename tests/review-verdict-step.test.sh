@@ -64,9 +64,9 @@ run 0 "no 'REVIEW-VERDICT"       "result record without .result"        success 
 run 1 "1 BLOCKING finding"       "CRLF endings + trailing CRLF blank line still parse" success skipped skipped "$TMP/crlf.json"
 run 0 "no 'REVIEW-VERDICT"       "sign-off after the trailer: not the last line (fails open, warns)" success skipped skipped "$TMP/signoff.json"
 run 0 "no 'REVIEW-VERDICT"       "bold-wrapped trailer: not exact (fails open, warns)" success skipped skipped "$TMP/bold.json"
-run 0 "NO review ran"            "success with NO execution file (validation skip)" success skipped skipped ""
-run 0 "NO review ran"            "success, file has no result record"   success skipped skipped "$TMP/norecord.json"
-run 0 "NO review ran"            "success but the record is an error (earlier attempt's)" failure success skipped "$TMP/failrec.json"
+run 1 "NO review ran"            "success with NO execution file (validation skip): fails closed" success skipped skipped ""
+run 1 "NO review ran"            "success, file has no result record: fails closed"   success skipped skipped "$TMP/norecord.json"
+run 1 "NO review ran"            "success but the record is an error (earlier attempt's): fails closed" failure success skipped "$TMP/failrec.json"
 run 0 "known 2026-08-31 upstream bug" "known upstream crash (unchanged)" failure failure failure "$TMP/crash.json"
 run 1 "did not succeed"          "real failure (unchanged, fail closed)" failure failure failure "$TMP/failrec.json"
 

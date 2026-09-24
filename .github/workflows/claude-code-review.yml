@@ -335,12 +335,16 @@ jobs:
           if [ "$SUCCEEDED" = 1 ]; then
             # No result means NO REVIEW RAN. claude-code-action exits 0 when it skips
             # itself, e.g. its workflow-validation skip on a PR that edits the workflow
-            # invoking it (rarebit-sre#374). STAGE 1 is log-only: loud, not red, until
-            # enough runs confirm a real success always leaves a result here.
+            # invoking it (rarebit-sre#374). STAGE 2 (2026-09-25): FAIL CLOSED. Stage 1
+            # logged this for 104 review runs across rarebit-one; all 6 hits were PRs
+            # editing their own review caller (0 false positives), and 4 of those were
+            # auto-merged with no review at all. A green gate must mean a review ran.
+            # Dependabot PRs never reach this step (the review steps are gated off
+            # them), so this only reds PRs a human or an engine wrote.
             if [ -z "$EF" ] || ! has_result "$EF"; then
-              echo "::warning::Claude Code Review reported success but produced no review result — the action most likely SKIPPED itself (e.g. a workflow-validation skip because this PR edits the workflow that invokes it; rarebit-sre#374). NO review ran: treat this PR as unreviewed. (Log-only for now.)"
-              { echo "### :warning: No review ran"; echo; echo "The review action reported success without producing a result — most likely a workflow-validation skip (this PR edits the review caller). **Treat this PR as unreviewed** (rarebit-sre#374)."; } >> "$GITHUB_STEP_SUMMARY"
-              exit 0
+              echo "::error::Claude Code Review reported success but produced no review result — the action SKIPPED itself (most likely a workflow-validation skip because this PR edits the workflow that invokes it; rarebit-sre#374). NO review ran, so this gate fails closed: have a human review the diff and merge."
+              { echo "### :x: No review ran — human review required"; echo; echo "The review action reported success without producing a result — most likely a workflow-validation skip (this PR edits the review caller). **This PR is unreviewed**: a human must review and merge it (rarebit-sre#374)."; } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
             fi
             echo "verdict: result record — $(jq -c '{subtype, is_error, num_turns, total_cost_usd}' <<<"$(last_result "$EF" 2>/dev/null || true)" 2>/dev/null || echo unreadable)"
             n="$(review_blocking "$EF" || true)"
