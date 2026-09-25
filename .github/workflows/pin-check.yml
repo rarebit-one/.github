@@ -582,7 +582,17 @@ jobs:
           if __name__ == "__main__":
               sys.exit(main())
           WFRUN_CHECK_EOF
-          python3 "${RUNNER_TEMP}/wfrun_check.py" .
+          # wfrun_check needs PyYAML. GitHub-hosted images ship it; the self-hosted jdb/broker
+          # runner image ships python3 but not PyYAML (nor pip), so provide it in a
+          # throwaway venv when it's absent. No-op on a runner that already has it.
+          # (Same as fundbright/.github pin-check.yml.)
+          PY=python3
+          if ! python3 -c 'import yaml' 2>/dev/null; then
+            python3 -m venv "${RUNNER_TEMP}/pcvenv"
+            "${RUNNER_TEMP}/pcvenv/bin/pip" install --quiet pyyaml
+            PY="${RUNNER_TEMP}/pcvenv/bin/python"
+          fi
+          "$PY" "${RUNNER_TEMP}/wfrun_check.py" .
       # Fifth, and offline: things GitHub REJECTS (or a job cannot run) that the
       # pinning checks above never look at. Each one has cost the estate a
       # silent outage — a workflow that simply stops running while nothing goes
@@ -605,7 +615,16 @@ jobs:
           BROKER_LABEL: jdb
         run: |
           set -euo pipefail
-          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --user --break-system-packages pyyaml
+          # wf_validity needs PyYAML. GitHub-hosted images ship it; the self-hosted jdb/broker
+          # runner image ships python3 but not PyYAML (nor pip), so provide it in a
+          # throwaway venv when it's absent. No-op on a runner that already has it.
+          # (Same as fundbright/.github pin-check.yml.)
+          PY=python3
+          if ! python3 -c 'import yaml' 2>/dev/null; then
+            python3 -m venv "${RUNNER_TEMP}/pcvenv"
+            "${RUNNER_TEMP}/pcvenv/bin/pip" install --quiet pyyaml
+            PY="${RUNNER_TEMP}/pcvenv/bin/python"
+          fi
           cat > "${RUNNER_TEMP}/wf_validity.py" <<'WF_VALIDITY_EOF'
           #!/usr/bin/env python3
           """Workflow-validity checks GitHub enforces (or that make a job unrunnable) but that
@@ -753,4 +772,4 @@ jobs:
               sys.exit(main(sys.argv[1:]))
           WF_VALIDITY_EOF
           # $PATHS is intentionally unquoted: space-separated, env-expanded only.
-          python3 "${RUNNER_TEMP}/wf_validity.py" $PATHS
+          "$PY" "${RUNNER_TEMP}/wf_validity.py" $PATHS
