@@ -136,16 +136,20 @@ jobs:
           key: ${{ inputs.lint-cache-key }}
 
       - name: Lint code for consistent style
-        run: ${{ inputs.lint-command }}
+        # The caller's command is passed via env and eval'd rather than templated into
+        # the script: same parsing and shell options, but no template injection.
+        env:
+          LINT_COMMAND: ${{ inputs.lint-command }}
+        run: eval "$LINT_COMMAND"
 
       - name: Run extra lint commands
         if: ${{ inputs.extra-lint-commands != '' }}
         shell: bash
+        env:
+          EXTRA_LINT_COMMANDS: ${{ inputs.extra-lint-commands }}
         run: |
           set -euo pipefail
-          cat <<'RAREBIT_EXTRA_LINT_EOF' | bash -euo pipefail
-          ${{ inputs.extra-lint-commands }}
-          RAREBIT_EXTRA_LINT_EOF
+          printf '%s\n' "$EXTRA_LINT_COMMANDS" | bash -euo pipefail
 
   test-matrix:
     if: ${{ inputs.ruby-versions != '' && inputs.ruby-versions != '[]' }}
@@ -186,16 +190,16 @@ jobs:
         shell: bash
         env:
           RAILS_ENV: test
+          PRE_TEST_COMMANDS: ${{ inputs.pre-test-commands }}
         run: |
           set -euo pipefail
-          cat <<'RAREBIT_PRE_TEST_EOF' | bash -euo pipefail
-          ${{ inputs.pre-test-commands }}
-          RAREBIT_PRE_TEST_EOF
+          printf '%s\n' "$PRE_TEST_COMMANDS" | bash -euo pipefail
 
       - name: Run tests
         env:
           RAILS_ENV: test
-        run: ${{ inputs.test-command }}
+          TEST_COMMAND: ${{ inputs.test-command }}
+        run: eval "$TEST_COMMAND"
 
       - name: Keep screenshots from failed system tests
         if: ${{ failure() && inputs.upload-screenshots }}

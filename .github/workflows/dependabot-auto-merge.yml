@@ -648,6 +648,7 @@ jobs:
           REVIEW_DETAIL: ${{ steps.maintainer_review_gate.outputs.detail }}
           MERGE_TOKEN_MODE: ${{ steps.token.outputs.mode }}
           PR_URL: ${{ github.event.pull_request.html_url }}
+          ACTOR: ${{ github.actor }}
         run: |
           {
             echo "### Auto-lander decision"
@@ -655,7 +656,7 @@ jobs:
             echo "| field | value |"
             echo "|---|---|"
             echo "| PR | $PR_URL |"
-            echo "| actor | ${{ github.actor }} |"
+            echo "| actor | ${ACTOR} |"
             echo "| ecosystem | ${ECOSYSTEM:-—} |"
             echo "| dependency-group | ${DEP_GROUP:-none (ungrouped)} |"
             echo "| update-type | ${UPDATE_TYPE:-—} |"

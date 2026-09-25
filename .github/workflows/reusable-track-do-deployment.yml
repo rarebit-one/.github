@@ -164,8 +164,10 @@ jobs:
           ENVIRONMENT_URL: ${{ inputs.environment_url }}
           HEALTH_PATH: ${{ inputs.health_path }}
           READINESS_PATH: ${{ inputs.readiness_path }}
+          ENVIRONMENT_INPUT: ${{ inputs.environment }}
+          ENVIRONMENT_URL_INPUT: ${{ inputs.environment_url }}
         run: |
-          echo "Tracking deployment of commit $EXPECTED_SHA to ${{ inputs.environment }}"
+          echo "Tracking deployment of commit $EXPECTED_SHA to ${ENVIRONMENT_INPUT}"
           echo "Polling DO API every ${POLL_INTERVAL}s (timeout: ${POLL_TIMEOUT}s)"
 
           ELAPSED=0
@@ -235,7 +237,7 @@ jobs:
             case "$PHASE" in
               ACTIVE)
                 echo ""
-                echo "DO reports ACTIVE for commit $EXPECTED_SHA on ${{ inputs.environment }}"
+                echo "DO reports ACTIVE for commit $EXPECTED_SHA on ${ENVIRONMENT_INPUT}"
 
                 # DO ACTIVE means the rollout finished — it does NOT mean the
                 # edge/ingress is actually routing public traffic to the
@@ -278,7 +280,7 @@ jobs:
                     {
                       echo "### Deployment ACTIVE but unreachable 🚨"
                       echo ""
-                      echo "- **Environment:** ${{ inputs.environment }}"
+                      echo "- **Environment:** ${ENVIRONMENT_INPUT}"
                       echo "- **Commit:** \`$EXPECTED_SHA\`"
                       echo "- **DO Deployment ID:** \`$DEPLOY_ID\`"
                       echo "- **Probe:** \`$HEALTH_URL\` → last HTTP \`${CODE}\` (no 2xx/3xx in 12 tries)"
@@ -316,14 +318,14 @@ jobs:
                 fi
 
                 echo ""
-                echo "Deployment succeeded — commit $EXPECTED_SHA is live on ${{ inputs.environment }}"
+                echo "Deployment succeeded — commit $EXPECTED_SHA is live on ${ENVIRONMENT_INPUT}"
                 echo ""
                 echo "### Deployment Successful" >> "$GITHUB_STEP_SUMMARY"
                 echo "" >> "$GITHUB_STEP_SUMMARY"
-                echo "- **Environment:** ${{ inputs.environment }}" >> "$GITHUB_STEP_SUMMARY"
+                echo "- **Environment:** ${ENVIRONMENT_INPUT}" >> "$GITHUB_STEP_SUMMARY"
                 echo "- **Commit:** \`$EXPECTED_SHA\`" >> "$GITHUB_STEP_SUMMARY"
                 echo "- **DO Deployment ID:** \`$DEPLOY_ID\`" >> "$GITHUB_STEP_SUMMARY"
-                echo "- **URL:** ${{ inputs.environment_url }}" >> "$GITHUB_STEP_SUMMARY"
+                echo "- **URL:** ${ENVIRONMENT_URL_INPUT}" >> "$GITHUB_STEP_SUMMARY"
                 if [ -n "$HEALTH_PATH" ]; then
                   echo "- **Public reachability:** \`${ENVIRONMENT_URL%/}${HEALTH_PATH}\` → HTTP \`$REACHABLE\` ✅" >> "$GITHUB_STEP_SUMMARY"
                 fi
@@ -337,7 +339,7 @@ jobs:
                 echo ""
                 echo "### Deployment Failed" >> "$GITHUB_STEP_SUMMARY"
                 echo "" >> "$GITHUB_STEP_SUMMARY"
-                echo "- **Environment:** ${{ inputs.environment }}" >> "$GITHUB_STEP_SUMMARY"
+                echo "- **Environment:** ${ENVIRONMENT_INPUT}" >> "$GITHUB_STEP_SUMMARY"
                 echo "- **Commit:** \`$EXPECTED_SHA\`" >> "$GITHUB_STEP_SUMMARY"
                 echo "- **DO Deployment ID:** \`$DEPLOY_ID\`" >> "$GITHUB_STEP_SUMMARY"
                 echo "- **Phase:** ERROR" >> "$GITHUB_STEP_SUMMARY"
@@ -374,7 +376,7 @@ jobs:
                   echo "" >> "$GITHUB_STEP_SUMMARY"
                   echo "DO cancelled this deployment because a newer one started. That newer deployment's own tracking run reports the live result." >> "$GITHUB_STEP_SUMMARY"
                   echo "" >> "$GITHUB_STEP_SUMMARY"
-                  echo "- **Environment:** ${{ inputs.environment }}" >> "$GITHUB_STEP_SUMMARY"
+                  echo "- **Environment:** ${ENVIRONMENT_INPUT}" >> "$GITHUB_STEP_SUMMARY"
                   echo "- **Commit:** \`$EXPECTED_SHA\`" >> "$GITHUB_STEP_SUMMARY"
                   echo "- **DO Deployment ID:** \`$DEPLOY_ID\`" >> "$GITHUB_STEP_SUMMARY"
                   echo "- **Newer deployments:** $NEWER_COUNT" >> "$GITHUB_STEP_SUMMARY"
@@ -384,7 +386,7 @@ jobs:
                 echo ""
                 echo "### Deployment Canceled" >> "$GITHUB_STEP_SUMMARY"
                 echo "" >> "$GITHUB_STEP_SUMMARY"
-                echo "- **Environment:** ${{ inputs.environment }}" >> "$GITHUB_STEP_SUMMARY"
+                echo "- **Environment:** ${ENVIRONMENT_INPUT}" >> "$GITHUB_STEP_SUMMARY"
                 echo "- **Commit:** \`$EXPECTED_SHA\`" >> "$GITHUB_STEP_SUMMARY"
                 echo "- **DO Deployment ID:** \`$DEPLOY_ID\`" >> "$GITHUB_STEP_SUMMARY"
                 exit 1

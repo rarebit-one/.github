@@ -78,8 +78,10 @@ jobs:
 
       - name: Determine target SHA
         id: main
+        env:
+          REF_INPUT: ${{ inputs.ref }}
         run: |
-          REF="${{ inputs.ref }}"
+          REF="${REF_INPUT}"
           if [ -n "$REF" ]; then
             if ! git rev-parse --verify "$REF" &>/dev/null; then
               echo "::error::Ref '$REF' is not a valid commit"
@@ -100,6 +102,7 @@ jobs:
       - name: Verify CI passed on main
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_WORKFLOW_INPUT: ${{ inputs.ci_workflow }}
         run: |
           SHA="${{ steps.main.outputs.sha }}"
           echo "Checking CI status for $SHA"
@@ -107,7 +110,7 @@ jobs:
           CONCLUSION=""
           for i in 1 2 3; do
             CONCLUSION=$(gh run list \
-              --workflow="${{ inputs.ci_workflow }}" \
+              --workflow="${CI_WORKFLOW_INPUT}" \
               --branch=main \
               --json headSha,conclusion \
               --jq ".[] | select(.headSha == \"$SHA\") | .conclusion" \
