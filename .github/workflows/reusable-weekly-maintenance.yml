@@ -569,6 +569,10 @@ jobs:
             --allowed-tools "${{ steps.build-prompt.outputs.allowed-tools }}"
             --effort high
 
+          # Callers' scheduled runs can be attributed to rarebit-one[bot] (the org auto-lander)
+          # after it merges a change to the calling workflow, and the action rejects bot actors
+          # unless listed — seen on rarebit-ops/rarebit-sre beats, 2026-09-25.
+          allowed_bots: 'rarebit-one[bot]'
       # ----- artifacts -----
 
       - name: Upload maintenance artifacts
