@@ -33,19 +33,27 @@ on:
         description: "true when the repo is an org workspace root (workspace-config): tighter budgets"
         type: boolean
         default: false
+      runner-label:
+        description: >-
+          Runner to use. Empty (the default) means: the caller repo's
+          vars.RUNNER_LABEL (the homelab pool) when the repo is PRIVATE, else
+          ubuntu-latest. Public repos always stay hosted, because the self-hosted
+          runner groups refuse public repositories and the job would queue forever.
+        type: string
+        default: ""
 
 permissions:
   contents: read
 
 jobs:
   estate-check:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner-label || (github.event.repository.private && vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: rarebit-one/estate-check@4c19f6e7db0424a30262d493dc3336374ed6064a # v1.1.0
+      - uses: rarebit-one/estate-check@ccd062e801fdf0dce487649d435033671ed8453a # v1.1.1
         with:
           mode: ${{ inputs.mode }}
           workspace: ${{ inputs.workspace }}
