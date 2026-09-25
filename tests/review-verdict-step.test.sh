@@ -64,11 +64,24 @@ run 0 "no 'REVIEW-VERDICT"       "result record without .result"        success 
 run 1 "1 BLOCKING finding"       "CRLF endings + trailing CRLF blank line still parse" success skipped skipped "$TMP/crlf.json"
 run 0 "no 'REVIEW-VERDICT"       "sign-off after the trailer: not the last line (fails open, warns)" success skipped skipped "$TMP/signoff.json"
 run 0 "no 'REVIEW-VERDICT"       "bold-wrapped trailer: not exact (fails open, warns)" success skipped skipped "$TMP/bold.json"
-run 0 "NO review ran"            "success with NO execution file (validation skip)" success skipped skipped ""
-run 0 "NO review ran"            "success, file has no result record"   success skipped skipped "$TMP/norecord.json"
-run 0 "NO review ran"            "success but the record is an error (earlier attempt's)" failure success skipped "$TMP/failrec.json"
+run 1 "NO review ran"            "success with NO execution file (validation skip): fails closed" success skipped skipped ""
+run 1 "NO review ran"            "success, file has no result record: fails closed"   success skipped skipped "$TMP/norecord.json"
+run 1 "NO review ran"            "success but the record is an error (earlier attempt's): fails closed" failure success skipped "$TMP/failrec.json"
 run 0 "known 2026-08-31 upstream bug" "known upstream crash (unchanged)" failure failure failure "$TMP/crash.json"
 run 1 "did not succeed"          "real failure (unchanged, fail closed)" failure failure failure "$TMP/failrec.json"
+
+# A retry that SUCCEEDS must stay green. Every attempt writes the same
+# $RUNNER_TEMP file, so EF2 points at the successful record: exercise EF2 set,
+# EF1 empty (attempt 1 failed before writing an output).
+run_ef2() { # run_ef2 <want-exit> <want-substring> <label> <O1> <O2> <O3> <EF2>
+  local want="$1" sub="$2" label="$3" out rc
+  mkdir -p "$TMP/rt"; : > "$TMP/summary"
+  out=$(env O1="$4" O2="$5" O3="$6" EF1= EF2="$7" EF3= RUNNER_TEMP="$TMP/rt" GITHUB_STEP_SUMMARY="$TMP/summary" \
+        bash -e "$TMP/step.sh" 2>&1); rc=$?
+  if [ "$rc" = "$want" ] && grep -qF -- "$sub" <<<"$out"; then pass=$((pass+1)); echo "ok   - $label (exit $rc)"
+  else fail=$((fail+1)); echo "FAIL - $label: wanted exit $want + '$sub', got exit $rc"; echo "$out" | tail -3 | sed 's/^/       /'; fi
+}
+run_ef2 0 "0 blocking findings"  "retry succeeded (EF2 = real result): stays green" failure success skipped "$TMP/clean.json"
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

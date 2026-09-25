@@ -182,6 +182,29 @@ supply-chain guarantee is intact; we've only silenced a false "correct me" from
 the semver-comment heuristic. Replicate this block verbatim when fanning the
 self-healer out to the other orgs' `.github` repos.
 
+## Claude review: "No review ran" fails closed (rarebit-sre#374)
+
+`claude-code-action` skips itself, and exits 0, when the workflow that invokes it
+differs from the default branch's copy (its *workflow-validation skip*). That
+happens on every PR that edits its own review caller (`claude-code-review.yml` in
+a consumer repo, `pr.yml` here) and when a repo is first onboarded. Since stage 2,
+the *Review verdict* step treats "success but no result record" as **no review
+ran** and fails the check (`::error::`, exit 1). Re-running does not help: the
+skip repeats until the edited caller is on the default branch.
+
+**What to do when it fires:** a human reviews the diff and merges it.
+
+- **Consumer repos:** none of them require `Claude Code Review` as a status check
+  (checked 2026-09-25), so a maintainer merges after reviewing. The maintainer
+  auto-merge lane will not land it, because the review is red.
+- **This repo (`rarebit-one/.github`):** the `main protection` ruleset *requires*
+  `Claude Code Review / Claude Code Review`. It carries a **break-glass bypass**
+  (added 2026-09-25): actor `OrganizationAdmin`, `bypass_mode: pull_request`. An
+  org admin reviews the diff, then merges with the bypass. Every other rule
+  (signatures, linear history, the other required checks) still applies. Don't
+  remove that bypass while this gate fails closed, or the next `pr.yml` edit
+  can't be merged without editing the ruleset.
+
 ## Claude model selection
 
 Every workflow that invokes `anthropics/claude-code-action` (`claude-agent`,
