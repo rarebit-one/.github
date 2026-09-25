@@ -296,7 +296,13 @@ jobs:
           # `autoMergeAllowed` alone is not enough: the merge below is
           # `--squash`, so a repo with auto-merge on but squash merges disabled
           # would still leave the PR sitting. Require both.
-          MERGE_CAPS="$(gh repo view "$TARGET_REPO" --json autoMergeAllowed,squashMergeAllowed --jq '"\(.autoMergeAllowed) \(.squashMergeAllowed)"')"
+          # GraphQL, not `gh repo view --json autoMergeAllowed`: the runner's gh rejects
+          # that field ("Unknown JSON field"), which under `set -e` aborted this step
+          # AFTER the signed branch push but BEFORE the PR opened — every weekly run
+          # since 2026-08-23 left pin-fix/* branches with no PR.
+          MERGE_CAPS="$(gh api graphql -F owner="${TARGET_REPO%%/*}" -F name="${TARGET_REPO##*/}" \
+            -f query='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){autoMergeAllowed squashMergeAllowed}}' \
+            --jq '"\(.data.repository.autoMergeAllowed) \(.data.repository.squashMergeAllowed)"')"
           if [ "$MERGE_CAPS" = "true true" ]; then
             MERGE_NOTE="This PR has squash auto-merge enabled and lands once CI is green."
           else
@@ -339,6 +345,18 @@ jobs:
         run: |
           set -euo pipefail
           WF="pin-sweep"
+          # This repo has Issues disabled, so there is nowhere to file the deduped
+          # beat-failure issue (`gh issue list` errors out, which used to fail this job
+          # on EVERY run, green or not). Fall back to an error annotation: the job is
+          # red exactly when the sweep failed, and green otherwise.
+          if [ "$(gh api "repos/${GH_REPO}" --jq '.has_issues')" != "true" ]; then
+            if [ "${FAILED}" = "true" ]; then
+              echo "::error title=beat failure: ${WF}::Scheduled pin-sweep failed before finishing — some repos may still carry unpinned actions. Run: ${RUN_URL}"
+              exit 1
+            fi
+            echo "No failure to report (Issues are disabled on ${GH_REPO}, so no issue to clear)."
+            exit 0
+          fi
           EXISTING="$(gh issue list --search "\"beat failure: ${WF}\" in:title" --state open --json number --jq '.[0].number // empty')"
           if [ "${FAILED}" != "true" ]; then
             # Nothing failed. Close any open failure issue only on a run that actually
