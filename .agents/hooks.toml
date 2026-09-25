@@ -6,3 +6,8 @@ version = 1
 id = "enforce-worktree"
 timeout = 10
 events = [{ on = "pre_tool", tools = ["edit", "write", "notebook"] }]
+
+[[hook]]
+id = "enforce-worktree-bash"
+timeout = 10
+events = [{ on = "pre_tool", tools = ["bash"] }]
