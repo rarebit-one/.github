@@ -90,12 +90,32 @@ jobs:
       # the CLAUDE_CODE_OAUTH_TOKEN secret without producing a hard failure.
       - name: Check for Claude OAuth token
         id: token-check
+        #
+        # A skipped review must not read as a clean one (rarebit-sre#317): the
+        # auto-lander's maintainer path arms auto-merge when this check is green,
+        # so a green "no token, no review" would land a maintainer PR unreviewed.
+        # So a missing token on a non-Dependabot PR FAILS the check, the same
+        # fail-closed rule the verdict step applies to a review that never ran.
+        # Every current caller has the token (org secret, visibility all), so
+        # this fires only on a real wiring gap. Dependabot PRs stay green: the
+        # maintainer gate does not consider them, and the reason is written to
+        # the step summary so it is greppable.
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
+          if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
+            echo "Claude review NOT run: Dependabot PR (by design, no LLM spend on version bumps)." >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-            echo "::warning::CLAUDE_CODE_OAUTH_TOKEN secret is not configured; skipping Claude review."
             echo "skip=true" >> "$GITHUB_OUTPUT"
+            if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
+              echo "::warning::CLAUDE_CODE_OAUTH_TOKEN secret is not configured; skipping Claude review."
+              exit 0
+            fi
+            echo "Claude review NOT run: CLAUDE_CODE_OAUTH_TOKEN is not configured for this repository." >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::CLAUDE_CODE_OAUTH_TOKEN is not configured, so NO review ran. Failing closed so this check cannot read as a clean review (rarebit-sre#317). Wire the secret, or have a human review and merge."
+            exit 1
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi

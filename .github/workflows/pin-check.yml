@@ -192,6 +192,12 @@ jobs:
         if: steps.prep.outputs.paths != ''
         env:
           OWNER: ${{ github.repository_owner }}
+          # pinact resolves tags through the GitHub API. Without a token it runs
+          # unauthenticated (60 req/h per runner IP, shared by every job on that
+          # IP), and PRs went red on `403 API rate limit exceeded` for pins they
+          # never touched (rarebit-sre#261). The read-only job token is enough to
+          # list public tags.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           cd "${RUNNER_TEMP}"
@@ -241,6 +247,13 @@ jobs:
             # semver-comment check only (still SHA-pinned). See octo-brain convention.
             - name: anthropics/claude-code-action
               ref: .*
+            # Docker image actions. pinact v4 cannot model them and errors
+            # "action can't be pinned" even on a digest-pinned
+            # docker://img@sha256:... ref (rarebit-sre#350). zizmor's
+            # unpinned-uses still fails a mutable docker://img:tag, so this does
+            # not open a hole.
+            - name: docker://.*
+              ref: .*
           EOF
 
           cd "$GITHUB_WORKSPACE"
@@ -250,7 +263,20 @@ jobs:
           # directory to GITHUB_PATH and then calling `pinact` bare exits 127 --
           # which is precisely the class of bug this whole change set is fixing,
           # committed once more while fixing it.
-          "${RUNNER_TEMP}/pinact" run --check -c /tmp/pinact.yaml
+          #
+          # Exit 1 is a real finding (an unpinned ref) and fails immediately. Any
+          # other non-zero exit is pinact failing to run, for example a GitHub API
+          # 504 while listing tags (rarebit-sre#261). Those get one retry, so an
+          # upstream blip doesn't redden an unrelated PR.
+          rc=0
+          "${RUNNER_TEMP}/pinact" run --check -c /tmp/pinact.yaml || rc=$?
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+            echo "::warning::pinact exited $rc (a tool/API error, not a pin finding); retrying once in 30s"
+            sleep 30
+            rc=0
+            "${RUNNER_TEMP}/pinact" run --check -c /tmp/pinact.yaml || rc=$?
+          fi
+          exit "$rc"
 
       # Third, independent check: pin INTEGRITY. zizmor and pinact both only prove
       # a ref is SHAPED like a commit SHA -- neither resolves it. A well-formed pin
