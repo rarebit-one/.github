@@ -520,6 +520,7 @@ A run does the following:
 
 | Input | Type | Required | Default | Description |
 |---|---|---|---|---|
+| `runner-label` | string | no | `ubuntu-latest` | Runner for the `maintenance` job. Public callers must keep `ubuntu-latest` (self-hosted groups refuse public repos, and the job queues forever). The `alert` heartbeat job always stays hosted so it cannot share fate with the pool it watches. If the chosen pool is offline, `alert` fires only after GitHub's 24h queue limit fails the queued job. |
 | `stack` | string | yes | — | One of `rails`, `ruby-gem`, `node-lib`, `node-app`, `kmp`. |
 | `ruby-version-file` | string | no | `.ruby-version` | Used for the `rails` and `ruby-gem` stacks unless `ruby-version` is set. |
 | `ruby-version` | string | no | `""` | Explicit Ruby version override. Wins over `ruby-version-file` when non-empty. |
@@ -720,6 +721,7 @@ block. Different problem; not interchangeable.)
 
 | Input | Required | Default | Notes |
 |-------|----------|---------|-------|
+| `runner-label` | no | `ubuntu-latest` | Runner for the `track` job. Public callers must keep `ubuntu-latest`. Private callers should route only when their `DIGITALOCEAN_ACCESS_TOKEN` is the read-only tracking shape; a write-capable DO token stays hosted under the 2026-08-14 blast-radius ruling. |
 | `environment` | yes | — | GitHub environment name. Also the PR-comment marker scope, so each environment maintains its own comment. This is where region-awareness lives: `production-sg` / `production-my` are two calls, not a region input. |
 | `environment_url` | yes | — | Public base URL; both probes are appended to it. |
 | `expected_commit_sha` | yes | — | The commit to track. Under `workflow_run`, use `github.event.workflow_run.head_sha` — `github.sha` is the workflow file's commit. |

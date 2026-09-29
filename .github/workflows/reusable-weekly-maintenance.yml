@@ -31,6 +31,18 @@ name: Reusable Weekly Maintenance
 on:
   workflow_call:
     inputs:
+      runner-label:
+        description: >-
+          Label of the runner the `maintenance` job executes on. Defaults to
+          ubuntu-latest, which is REQUIRED for public callers: the estate's
+          self-hosted runner groups carry `allows_public_repositories: false`,
+          so a public repo pointed at one has its job refused and it queues
+          forever with nothing red. Private callers pass their homelab label
+          (e.g. `hyperion`). The crash-heartbeat `alert` job ignores this and
+          always runs hosted; if the chosen pool is offline, it fires only after
+          GitHub's 24h queue limit fails the queued job.
+        type: string
+        default: 'ubuntu-latest'
       stack:
         description: 'Stack: rails | ruby-gem | node-lib | node-app | kmp'
         required: true
@@ -142,7 +154,14 @@ env:
 jobs:
   maintenance:
     name: Weekly Maintenance (${{ inputs.stack }})
-    runs-on: ubuntu-latest
+    # Caller-selectable (HLA-005); default unchanged. Checked against the
+    # 2026-08-14 blast-radius ruling that keeps reusable-deploy-docr-staging
+    # hosted, and it does NOT apply here: this job mints no credentials and
+    # holds no infra-scoped key. Its credentials are the job-scoped
+    # GITHUB_TOKEN and OIDC token (both expire with the job on any runner) and
+    # the Claude OAuth token, which grants model usage only and already runs
+    # self-hosted via claude-agent.yml's runner-label.
+    runs-on: ${{ inputs.runner-label }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
 
     permissions:
@@ -608,6 +627,15 @@ jobs:
   alert:
     needs: [maintenance]
     if: ${{ always() }}
+    # 🔴 HARDCODED ON PURPOSE — do not wire runner-label here (GHA-014 reason 1):
+    # alerting must not share fate with the pool it watches. A maintenance job
+    # that crashes or times out on a homelab runner is reported from here; on
+    # the same pool this job could be lost with it.
+    # Known latency: `needs:` means a pool that is OFFLINE leaves `maintenance`
+    # queued (timeout-minutes only starts once a runner picks it up) until
+    # GitHub's 24h queue limit fails it, and only then does this job fire. That
+    # is a one-day delay on a weekly beat, accepted rather than adding a
+    # separate watchdog. Callers who cannot accept it keep ubuntu-latest.
     runs-on: ubuntu-latest
     # Runaway-hang cap. A single gh issue list/create/comment/close step; finishes
     # in seconds. 5 replaces the implicit 360-min (6h) default.
