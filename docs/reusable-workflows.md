@@ -721,7 +721,7 @@ block. Different problem; not interchangeable.)
 
 | Input | Required | Default | Notes |
 |-------|----------|---------|-------|
-| `runner-label` | no | `ubuntu-latest` | Runner for the `track` job. Public callers must keep `ubuntu-latest`. Private callers should route only when their `DIGITALOCEAN_ACCESS_TOKEN` is the read-only tracking shape; a write-capable DO token stays hosted under the 2026-08-14 blast-radius ruling. |
+| `runner-label` | no | `ubuntu-latest` | Runner for the `track` job. Public callers must keep `ubuntu-latest`. A private caller may route to a self-hosted label **only** when it passes the read-only `DO_TRACK_TOKEN_A`/`_B` slots and does **not** pass `DIGITALOCEAN_ACCESS_TOKEN` (write-capable here; stays hosted under the 2026-08-14 blast-radius ruling). **Enforced:** the token preflight fails on a non-GitHub-hosted runner whenever `DIGITALOCEAN_ACCESS_TOKEN` is non-empty, including via `secrets: inherit`. Its value is also blanked at the expression layer off GitHub-hosted runners, so it never reaches a self-hosted step's environment. |
 | `environment` | yes | — | GitHub environment name. Also the PR-comment marker scope, so each environment maintains its own comment. This is where region-awareness lives: `production-sg` / `production-my` are two calls, not a region input. |
 | `environment_url` | yes | — | Public base URL; both probes are appended to it. |
 | `expected_commit_sha` | yes | — | The commit to track. Under `workflow_run`, use `github.event.workflow_run.head_sha` — `github.sha` is the workflow file's commit. |
@@ -740,7 +740,34 @@ block. Different problem; not interchangeable.)
 
 ### Secrets
 
-`DIGITALOCEAN_ACCESS_TOKEN` and `DIGITALOCEAN_APP_ID` (both required). The app-id
+| Secret | Required | Notes |
+|--------|----------|-------|
+| `DO_TRACK_TOKEN_A` | no | Read-only (`app:read`) tracking PAT. Tried first. |
+| `DO_TRACK_TOKEN_B` | no | Read-only (`app:read`) tracking PAT with a staggered expiry. Tried if A is absent, rejected, or inconclusive. |
+| `DIGITALOCEAN_ACCESS_TOKEN` | no | Legacy single token. Used **only when neither slot is passed**, so existing callers keep working unchanged. Forces a GitHub-hosted runner. |
+| `DIGITALOCEAN_APP_ID` | yes | See below. |
+
+**Token selection (HLA-005, `rarebit-sre#407`).** A preflight step probes each
+provided slot with one `GET /v2/apps/{id}`; the first to answer 200 is used for
+every DO API call in the job (poll and triage). Only the slot *name* is passed
+between steps, never a value. If A is rejected (401/403) and B works, the run
+stays green with a `::warning::` and a step-summary line saying to rotate A. If
+every provided token is rejected, the job fails fast with an "expired or
+revoked" error instead of polling to `poll_timeout`. The poll loop does the
+same for a 401/403 mid-run, and keeps retrying only genuinely transient errors.
+
+**Rotation model.** DO has no API to query a PAT's expiry, so mint the two
+slots with staggered lifetimes (e.g. 90 and 60 days at first mint) and rotate
+whichever expires first, ahead of time; the other slot keeps tracking alive in
+the meantime. Expiry dates live in the rarebit-sre credential registry. The
+runbook is the `do-deploy-tokens` skill.
+
+**Adopting the slots:** add `DO_TRACK_TOKEN_A` and `DO_TRACK_TOKEN_B` to the
+caller's `secrets:` block and delete its `DIGITALOCEAN_ACCESS_TOKEN` line (the
+slots win whenever present, but removing it is what permits `runner-label`
+routing).
+
+The app-id
 secret is per-app on the caller side — `DO_APP_ID`, `DO_STAGING_APP_ID`,
 `DO_MARKETING_APP_ID`, `DO_DOCS_APP_ID`, `DO_PRODUCTION_APP_ID_SG`/`_MY` — mapped
 onto the single `DIGITALOCEAN_APP_ID` name here. That mapping is what lets one
@@ -789,7 +816,8 @@ does not serve that path and red a healthy deploy. Pass the path explicitly:
       health_path: /health/alive
       readiness_path: /health/ready
     secrets:
-      DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      DO_TRACK_TOKEN_A: ${{ secrets.DO_TRACK_TOKEN_A }}
+      DO_TRACK_TOKEN_B: ${{ secrets.DO_TRACK_TOKEN_B }}
       DIGITALOCEAN_APP_ID: ${{ secrets.DO_PRODUCTION_APP_ID_SG }}
 ```
 

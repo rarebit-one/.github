@@ -23,6 +23,37 @@
 # Everything repo-specific is an input. Defaults are deliberately EMPTY for the
 # two probe paths so a consumer that does not opt in simply skips that leg
 # rather than acquiring a new blocking gate on a path it does not serve.
+#
+# DO API TOKEN — DUAL READ-ONLY SLOTS (HLA-005, rarebit-sre#407)
+#
+# The job only ever READS the DO API, so it should hold a read-only token. It
+# accepts three optional secrets and picks one in the "Select DO API token"
+# preflight step:
+#
+#   DO_TRACK_TOKEN_A, DO_TRACK_TOKEN_B — read-only `app:read` tracking PATs.
+#     Tried in order (A, then B) with one cheap authenticated
+#     GET /v2/apps/{id}; the first slot that answers 200 is used for every DO
+#     API call in the job. If A is rejected (401/403) and B works, the run stays
+#     green but emits a ::warning:: and a step-summary line saying to rotate A.
+#     When at least one slot is passed, DIGITALOCEAN_ACCESS_TOKEN is ignored.
+#   DIGITALOCEAN_ACCESS_TOKEN — the legacy single token, used only when neither
+#     slot is passed. That keeps every existing caller working unchanged. In
+#     this workspace it is a write-capable deploy token, so a caller passing it
+#     must stay GitHub-hosted (enforced below; see the runner-label input).
+#
+# If every provided token is rejected with 401/403 the job fails fast with an
+# explicit "expired or revoked" error, instead of spinning to poll_timeout and
+# reporting a misleading timeout.
+#
+# Rotation model. DO has no API to query a PAT's expiry, so a dated token dies
+# silently. Two slots with STAGGERED expiries remove that cliff: mint them with
+# different lifetimes (e.g. 90 days for A and 60 days for B at first mint), and
+# ahead of time rotate whichever slot expires first, so one slot is always
+# valid while the other is being replaced. Each slot's expiry date lives in the
+# rarebit-sre credential registry; the runbook is the `do-deploy-tokens` skill
+# (mint in the DO console on the right team, `app:read` only, then
+# `gh secret set DO_TRACK_TOKEN_A|B`). A rotate-me warning from this workflow
+# means a slot has already expired: rotate it now.
 name: Track DigitalOcean Deployment
 
 on:
@@ -35,12 +66,16 @@ on:
           carry `allows_public_repositories: false`, so a public repo pointed at
           one has its job refused and it queues forever with nothing red. Private
           callers pass their homelab label (e.g. `hyperion`).
-          CREDENTIAL CHECK before opting in: this job holds the caller's
-          DIGITALOCEAN_ACCESS_TOKEN. Under the 2026-08-14 blast-radius ruling a
-          credential whose compromise grants more than the job's own read access
-          stays GitHub-hosted, so only route here when that token is the
-          read-only tracking shape (`app:read`). A write-capable or Full Access
-          DO token keeps this on ubuntu-latest.
+          CREDENTIAL RULE (enforced): route to a self-hosted label ONLY when you
+          pass the read-only tracking slots (DO_TRACK_TOKEN_A / DO_TRACK_TOKEN_B)
+          and do NOT pass DIGITALOCEAN_ACCESS_TOKEN at all. In this workspace
+          DIGITALOCEAN_ACCESS_TOKEN is a write-capable deploy token, and under
+          the 2026-08-14 blast-radius ruling a credential whose compromise
+          grants more than the job's own read access stays GitHub-hosted. The
+          token preflight fails the job on a non-GitHub-hosted runner whenever
+          DIGITALOCEAN_ACCESS_TOKEN is non-empty, even if slots are passed too.
+          `secrets: inherit` passes it implicitly, so a routed caller must list
+          its secrets explicitly.
         type: string
         default: 'ubuntu-latest'
       environment:
@@ -115,8 +150,16 @@ on:
           it without re-deriving the heuristic.
         value: ${{ jobs.track.outputs.phase }}
     secrets:
+      # Optional since HLA-005: pass the read-only slots below instead. Used
+      # only when neither slot is passed. See the header for selection rules.
       DIGITALOCEAN_ACCESS_TOKEN:
-        required: true
+        required: false
+      # Read-only (`app:read`) tracking tokens with staggered expiries. A is
+      # tried first, then B. See the header for the rotation model.
+      DO_TRACK_TOKEN_A:
+        required: false
+      DO_TRACK_TOKEN_B:
+        required: false
       DIGITALOCEAN_APP_ID:
         required: true
 
@@ -162,6 +205,8 @@ jobs:
       phase: ${{ steps.poll.outputs.phase }}
     # 20, not 15: the poll can run to poll_timeout (600s default) and the
     # reachability probe adds up to 12 x (10s curl + 10s sleep) = 240s on top.
+    # The token preflight adds at most ~110s before the poll (two slots x
+    # 3 x 15s probes + 2 x 5s sleeps), which still fits.
     # At 15 a slow-but-succeeding deploy plus a full probe retry would hit the
     # job cap and surface as an opaque timeout instead of the real error.
     timeout-minutes: 20
@@ -171,10 +216,130 @@ jobs:
       url: ${{ inputs.environment_url }}
 
     steps:
+      - name: Select DO API token
+        id: token
+        # Picks which secret every later DO API call uses and exposes only the
+        # slot NAME (A / B / LEGACY) as an output, never a value: later steps
+        # re-derive the token from `secrets.*` with that name, so no token
+        # passes through GITHUB_OUTPUT or GITHUB_ENV. See the file header for
+        # the selection and rotation rules.
+        env:
+          TOKEN_A: ${{ secrets.DO_TRACK_TOKEN_A }}
+          TOKEN_B: ${{ secrets.DO_TRACK_TOKEN_B }}
+          # The legacy (write-capable) value is blanked at the expression
+          # layer off GitHub-hosted runners, so it never reaches a self-hosted
+          # step's environment; only a non-secret presence flag does. Later
+          # steps apply the same runner.environment guard.
+          TOKEN_LEGACY: ${{ runner.environment == 'github-hosted' && secrets.DIGITALOCEAN_ACCESS_TOKEN || '' }}
+          TOKEN_LEGACY_PRESENT: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN != '' }}
+          DO_APP_ID: ${{ secrets.DIGITALOCEAN_APP_ID }}
+          RUNNER_ENV: ${{ runner.environment }}
+          RUNNER_LABEL: ${{ inputs.runner-label }}
+        run: |
+          set -euo pipefail
+
+          # Enforce the runner-label credential rule: the write-capable legacy
+          # token never lands on a self-hosted runner.
+          if [ "${RUNNER_ENV:-}" != "github-hosted" ] && [ "${TOKEN_LEGACY_PRESENT:-false}" = "true" ]; then
+            echo "::error::DIGITALOCEAN_ACCESS_TOKEN was passed to a non-GitHub-hosted runner (runner-label '${RUNNER_LABEL:-}', runner.environment '${RUNNER_ENV:-unknown}'). In this workspace it is a write-capable deploy token, so this job must stay on ubuntu-latest while it holds it. To route off-hosted, pass only the read-only DO_TRACK_TOKEN_A / DO_TRACK_TOKEN_B slots and stop passing DIGITALOCEAN_ACCESS_TOKEN (no 'secrets: inherit')."
+            {
+              echo "### DO token refused on a self-hosted runner 🚫"
+              echo ""
+              echo "\`DIGITALOCEAN_ACCESS_TOKEN\` (write-capable) may only run GitHub-hosted. Pass only \`DO_TRACK_TOKEN_A\` / \`DO_TRACK_TOKEN_B\` (read-only) to route to \`${RUNNER_LABEL:-}\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          # One authenticated GET; prints the HTTP status only. 200/401/403 are
+          # definitive. Anything else (000, 429, 5xx, 404) is retried twice, then
+          # reported as-is. The response body is discarded, so nothing about
+          # the app or the token reaches the log.
+          probe() {
+            local token="$1" code="000" attempt
+            for attempt in 1 2 3; do
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+                -H "Authorization: Bearer $token" \
+                "https://api.digitalocean.com/v2/apps/$DO_APP_ID") || true
+              case "$code" in 200|401|403) break ;; esac
+              if [ "$attempt" -lt 3 ]; then sleep 5; fi
+            done
+            printf '%s' "$code"
+          }
+
+          CANDIDATES=()
+          if [ -n "${TOKEN_A:-}" ]; then CANDIDATES+=(A); fi
+          if [ -n "${TOKEN_B:-}" ]; then CANDIDATES+=(B); fi
+          if [ "${#CANDIDATES[@]}" -eq 0 ]; then
+            if [ -z "${TOKEN_LEGACY:-}" ]; then
+              echo "::error::No DO API token was passed. Pass DO_TRACK_TOKEN_A and/or DO_TRACK_TOKEN_B (read-only app:read), or DIGITALOCEAN_ACCESS_TOKEN."
+              exit 1
+            fi
+            CANDIDATES=(LEGACY)
+          fi
+
+          SELECTED=""
+          FALLBACK=""
+          REJECTED=()
+          for slot in "${CANDIDATES[@]}"; do
+            case "$slot" in
+              A) token="$TOKEN_A"; name="DO_TRACK_TOKEN_A" ;;
+              B) token="$TOKEN_B"; name="DO_TRACK_TOKEN_B" ;;
+              *) token="$TOKEN_LEGACY"; name="DIGITALOCEAN_ACCESS_TOKEN" ;;
+            esac
+            code=$(probe "$token")
+            case "$code" in
+              200)
+                echo "Using $name (GET /v2/apps/{id} -> HTTP 200)"
+                SELECTED="$slot"
+                break
+                ;;
+              401|403)
+                echo "::warning::$name was rejected by the DO API (HTTP $code): expired or revoked. Rotate it (see the do-deploy-tokens skill)."
+                REJECTED+=("$name (HTTP $code)")
+                ;;
+              *)
+                # Not an auth verdict (DO outage, rate limit, wrong app id).
+                # Remember the first such slot as a fallback so the poll loop's
+                # transient-retry handling still gets a chance, but keep
+                # looking for a slot that answers 200.
+                echo "::warning::$name probe was inconclusive (HTTP $code); trying the next slot"
+                if [ -z "$FALLBACK" ]; then FALLBACK="$slot"; fi
+                ;;
+            esac
+          done
+
+          if [ -z "$SELECTED" ] && [ -n "$FALLBACK" ]; then
+            SELECTED="$FALLBACK"
+            echo "::warning::No DO token answered 200; continuing with slot $SELECTED, whose probe was inconclusive rather than rejected"
+          fi
+
+          if [ -z "$SELECTED" ]; then
+            echo "::error::Every DO API token passed to this job was rejected (401/403): ${REJECTED[*]}. HTTP 401/403 means the token has expired or been revoked, not a transient DO error. Mint a replacement and update the secret; the runbook is the do-deploy-tokens skill, and slot expiries are in the rarebit-sre credential registry."
+            {
+              echo "### DO API token rejected 🔑"
+              echo ""
+              echo "Every DO token passed to this job answered 401/403 (expired or revoked):"
+              echo ""
+              for r in "${REJECTED[@]}"; do echo "- \`$r\`"; done
+              echo ""
+              echo "Rotate per the \`do-deploy-tokens\` skill. Expiry dates live in the rarebit-sre credential registry."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "rejected=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          if [ "${#REJECTED[@]}" -gt 0 ]; then
+            {
+              echo "> ⚠️ **Rotate DO tracking token:** ${REJECTED[*]} was rejected (expired or revoked); this run used slot \`$SELECTED\`. See the \`do-deploy-tokens\` skill."
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "slot=$SELECTED" >> "$GITHUB_OUTPUT"
+
       - name: Wait for DO deployment to complete
         id: poll
         env:
-          DO_API_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          DO_API_TOKEN: ${{ steps.token.outputs.slot == 'A' && secrets.DO_TRACK_TOKEN_A || steps.token.outputs.slot == 'B' && secrets.DO_TRACK_TOKEN_B || steps.token.outputs.slot == 'LEGACY' && runner.environment == 'github-hosted' && secrets.DIGITALOCEAN_ACCESS_TOKEN || '' }}
           DO_APP_ID: ${{ secrets.DIGITALOCEAN_APP_ID }}
           EXPECTED_SHA: ${{ inputs.expected_commit_sha }}
           POLL_INTERVAL: ${{ inputs.poll_interval }}
@@ -184,26 +349,57 @@ jobs:
           READINESS_PATH: ${{ inputs.readiness_path }}
           ENVIRONMENT_INPUT: ${{ inputs.environment }}
           ENVIRONMENT_URL_INPUT: ${{ inputs.environment_url }}
+          TOKEN_SLOT: ${{ steps.token.outputs.slot }}
         run: |
           echo "Tracking deployment of commit $EXPECTED_SHA to ${ENVIRONMENT_INPUT}"
           echo "Polling DO API every ${POLL_INTERVAL}s (timeout: ${POLL_TIMEOUT}s)"
 
           ELAPSED=0
+          RESPONSE_FILE=$(mktemp)
+          trap 'rm -f "$RESPONSE_FILE"' EXIT
 
           while [ "$ELAPSED" -lt "$POLL_TIMEOUT" ]; do
             # Fetch recent deployments for the app
             # `if !` keeps a failed curl from tripping the shell's `set -e`
             # (GitHub's default `bash -eo pipefail`) so a transient API error
             # retries instead of aborting the step with a cryptic exit code.
-            if ! RESPONSE=$(curl -sf \
+            #
+            # The status code is captured separately from the body so an auth
+            # rejection is not mistaken for a transient error: 401/403 means
+            # the token expired or was revoked mid-run, which no amount of
+            # retrying fixes, so fail fast instead of spinning to POLL_TIMEOUT
+            # and reporting a misleading timeout. `|| true` for the same reason
+            # as the reachability probe below: curl's -w already writes 000 on
+            # a connection-level failure.
+            HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w '%{http_code}' --max-time 30 \
               -H "Authorization: Bearer $DO_API_TOKEN" \
               -H "Content-Type: application/json" \
-              "https://api.digitalocean.com/v2/apps/$DO_APP_ID/deployments?per_page=50"); then
-              echo "::warning::Failed to fetch deployments from DO API — retrying"
-              sleep "$POLL_INTERVAL"
-              ELAPSED=$((ELAPSED + POLL_INTERVAL))
-              continue
-            fi
+              "https://api.digitalocean.com/v2/apps/$DO_APP_ID/deployments?per_page=50") || true
+            case "$HTTP_CODE" in
+              200)
+                RESPONSE=$(cat "$RESPONSE_FILE")
+                ;;
+              401|403)
+                echo "::error::DO API rejected the tracking token (HTTP $HTTP_CODE, slot ${TOKEN_SLOT:-unknown}): expired or revoked, not a transient error. Rotate it per the do-deploy-tokens skill; expiries are in the rarebit-sre credential registry."
+                echo "token_rejected=true" >> "$GITHUB_OUTPUT"
+                {
+                  echo "### DO API token rejected 🔑"
+                  echo ""
+                  echo "- **Environment:** ${ENVIRONMENT_INPUT}"
+                  echo "- **Commit:** \`$EXPECTED_SHA\`"
+                  echo "- **Token slot:** \`${TOKEN_SLOT:-unknown}\` → HTTP \`$HTTP_CODE\` (expired or revoked)"
+                  echo ""
+                  echo "The deployment itself was not observed. Rotate the token per the \`do-deploy-tokens\` skill."
+                } >> "$GITHUB_STEP_SUMMARY"
+                exit 1
+                ;;
+              *)
+                echo "::warning::Failed to fetch deployments from DO API (HTTP $HTTP_CODE) — retrying"
+                sleep "$POLL_INTERVAL"
+                ELAPSED=$((ELAPSED + POLL_INTERVAL))
+                continue
+                ;;
+            esac
 
             # Find the deployment matching our commit SHA. DO's deployment
             # object has NO top-level .commit_sha — that field simply doesn't
@@ -457,7 +653,8 @@ jobs:
         if: failure() && inputs.enable_triage
         continue-on-error: true
         env:
-          DO_API_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          # Same slot the preflight selected (see "Select DO API token").
+          DO_API_TOKEN: ${{ steps.token.outputs.slot == 'A' && secrets.DO_TRACK_TOKEN_A || steps.token.outputs.slot == 'B' && secrets.DO_TRACK_TOKEN_B || steps.token.outputs.slot == 'LEGACY' && runner.environment == 'github-hosted' && secrets.DIGITALOCEAN_ACCESS_TOKEN || '' }}
           DO_APP_ID: ${{ secrets.DIGITALOCEAN_APP_ID }}
           DEPLOY_ID: ${{ steps.poll.outputs.deploy_id }}
         run: |
@@ -476,8 +673,9 @@ jobs:
               echo ""
               echo "That means the failure happened **before DO started a deployment** —"
               echo "so it is not an app problem. Look at the workflow itself:"
-              echo "caller permissions, missing secrets, or a build that never"
-              echo "triggered \`deploy_on_push\`."
+              echo "caller permissions, missing secrets, a rejected DO API token"
+              echo "(401/403, see above), or a build that never triggered"
+              echo "\`deploy_on_push\`."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -605,6 +803,7 @@ jobs:
           JOB_STATUS: ${{ steps.poll.outcome }}
           DO_DEPLOY_ID: ${{ steps.poll.outputs.deploy_id }}
           DO_PHASE: ${{ steps.poll.outputs.phase }}
+          TOKEN_REJECTED: ${{ steps.token.outputs.rejected || steps.poll.outputs.token_rejected }}
           DO_APP_ID: ${{ secrets.DIGITALOCEAN_APP_ID }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -635,6 +834,10 @@ jobs:
           else
             ICON="🚨"
             PHASE_DETAIL="${DO_PHASE:-tracker timed out before any matching DO deployment}"
+            if [ "${TOKEN_REJECTED:-}" = "true" ]; then
+              # The deploy was never observed: say so rather than blaming it.
+              PHASE_DETAIL="not observed: DO API token rejected (expired or revoked), rotate it"
+            fi
             HEADLINE="**${ENV_NAME}** deploy of \`${SHORT_SHA}\` failed (\`${PHASE_DETAIL}\`)"
             LINKS="[Tracker run](${RUN_URL})${DO_LINK}"
           fi
