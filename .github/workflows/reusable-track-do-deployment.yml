@@ -205,6 +205,8 @@ jobs:
       phase: ${{ steps.poll.outputs.phase }}
     # 20, not 15: the poll can run to poll_timeout (600s default) and the
     # reachability probe adds up to 12 x (10s curl + 10s sleep) = 240s on top.
+    # The token preflight adds at most ~110s before the poll (two slots x
+    # 3 x 15s probes + 2 x 5s sleeps), which still fits.
     # At 15 a slow-but-succeeding deploy plus a full probe retry would hit the
     # job cap and surface as an opaque timeout instead of the real error.
     timeout-minutes: 20
@@ -224,7 +226,12 @@ jobs:
         env:
           TOKEN_A: ${{ secrets.DO_TRACK_TOKEN_A }}
           TOKEN_B: ${{ secrets.DO_TRACK_TOKEN_B }}
-          TOKEN_LEGACY: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          # The legacy (write-capable) value is blanked at the expression
+          # layer off GitHub-hosted runners, so it never reaches a self-hosted
+          # step's environment; only a non-secret presence flag does. Later
+          # steps apply the same runner.environment guard.
+          TOKEN_LEGACY: ${{ runner.environment == 'github-hosted' && secrets.DIGITALOCEAN_ACCESS_TOKEN || '' }}
+          TOKEN_LEGACY_PRESENT: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN != '' }}
           DO_APP_ID: ${{ secrets.DIGITALOCEAN_APP_ID }}
           RUNNER_ENV: ${{ runner.environment }}
           RUNNER_LABEL: ${{ inputs.runner-label }}
@@ -233,7 +240,7 @@ jobs:
 
           # Enforce the runner-label credential rule: the write-capable legacy
           # token never lands on a self-hosted runner.
-          if [ "${RUNNER_ENV:-}" != "github-hosted" ] && [ -n "${TOKEN_LEGACY:-}" ]; then
+          if [ "${RUNNER_ENV:-}" != "github-hosted" ] && [ "${TOKEN_LEGACY_PRESENT:-false}" = "true" ]; then
             echo "::error::DIGITALOCEAN_ACCESS_TOKEN was passed to a non-GitHub-hosted runner (runner-label '${RUNNER_LABEL:-}', runner.environment '${RUNNER_ENV:-unknown}'). In this workspace it is a write-capable deploy token, so this job must stay on ubuntu-latest while it holds it. To route off-hosted, pass only the read-only DO_TRACK_TOKEN_A / DO_TRACK_TOKEN_B slots and stop passing DIGITALOCEAN_ACCESS_TOKEN (no 'secrets: inherit')."
             {
               echo "### DO token refused on a self-hosted runner 🚫"
@@ -332,7 +339,7 @@ jobs:
       - name: Wait for DO deployment to complete
         id: poll
         env:
-          DO_API_TOKEN: ${{ steps.token.outputs.slot == 'A' && secrets.DO_TRACK_TOKEN_A || steps.token.outputs.slot == 'B' && secrets.DO_TRACK_TOKEN_B || secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          DO_API_TOKEN: ${{ steps.token.outputs.slot == 'A' && secrets.DO_TRACK_TOKEN_A || steps.token.outputs.slot == 'B' && secrets.DO_TRACK_TOKEN_B || steps.token.outputs.slot == 'LEGACY' && runner.environment == 'github-hosted' && secrets.DIGITALOCEAN_ACCESS_TOKEN || '' }}
           DO_APP_ID: ${{ secrets.DIGITALOCEAN_APP_ID }}
           EXPECTED_SHA: ${{ inputs.expected_commit_sha }}
           POLL_INTERVAL: ${{ inputs.poll_interval }}
@@ -647,7 +654,7 @@ jobs:
         continue-on-error: true
         env:
           # Same slot the preflight selected (see "Select DO API token").
-          DO_API_TOKEN: ${{ steps.token.outputs.slot == 'A' && secrets.DO_TRACK_TOKEN_A || steps.token.outputs.slot == 'B' && secrets.DO_TRACK_TOKEN_B || secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          DO_API_TOKEN: ${{ steps.token.outputs.slot == 'A' && secrets.DO_TRACK_TOKEN_A || steps.token.outputs.slot == 'B' && secrets.DO_TRACK_TOKEN_B || steps.token.outputs.slot == 'LEGACY' && runner.environment == 'github-hosted' && secrets.DIGITALOCEAN_ACCESS_TOKEN || '' }}
           DO_APP_ID: ${{ secrets.DIGITALOCEAN_APP_ID }}
           DEPLOY_ID: ${{ steps.poll.outputs.deploy_id }}
         run: |
