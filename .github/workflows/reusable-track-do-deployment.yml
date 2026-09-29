@@ -28,6 +28,21 @@ name: Track DigitalOcean Deployment
 on:
   workflow_call:
     inputs:
+      runner-label:
+        description: >-
+          Label of the runner to execute on. Defaults to ubuntu-latest, which is
+          REQUIRED for public callers: the estate's self-hosted runner groups
+          carry `allows_public_repositories: false`, so a public repo pointed at
+          one has its job refused and it queues forever with nothing red. Private
+          callers pass their homelab label (e.g. `hyperion`).
+          CREDENTIAL CHECK before opting in: this job holds the caller's
+          DIGITALOCEAN_ACCESS_TOKEN. Under the 2026-08-14 blast-radius ruling a
+          credential whose compromise grants more than the job's own read access
+          stays GitHub-hosted, so only route here when that token is the
+          read-only tracking shape (`app:read`). A write-capable or Full Access
+          DO token keeps this on ubuntu-latest.
+        type: string
+        default: 'ubuntu-latest'
       environment:
         description: "GitHub environment name (e.g., staging, production)"
         required: true
@@ -138,7 +153,10 @@ concurrency:
 jobs:
   track:
     name: Track ${{ inputs.environment }} deployment
-    runs-on: ubuntu-latest
+    # Caller-selectable (HLA-005): a <=600s DO API poll, not a gate. Default
+    # unchanged. See the runner-label input for the public-caller and
+    # DO-token-scope constraints.
+    runs-on: ${{ inputs.runner-label }}
     outputs:
       deploy_id: ${{ steps.poll.outputs.deploy_id }}
       phase: ${{ steps.poll.outputs.phase }}
