@@ -25,7 +25,7 @@ env:
   # Single source of truth for the Claude model across this repo's Claude
   # workflows. Override org-wide via the CLAUDE_MODEL Actions variable; the
   # literal is a safe fallback so an unset var can't yield an empty --model.
-  CLAUDE_MODEL: "${{ vars.CLAUDE_MODEL || 'claude-opus-4-8' }}"
+  CLAUDE_MODEL: "${{ vars.CLAUDE_MODEL || 'claude-sonnet-5-5' }}"
   # CLAUDE_TOOL_ARGS and REVIEW_PROMPT are both hoisted for one reason: the
   # review step below runs up to three times (see the retry block), Actions has
   # no YAML anchors, and three copies of either is three chances for them to
@@ -154,7 +154,7 @@ jobs:
         id: review_1
         if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]'
         continue-on-error: true
-        uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
+        uses: anthropics/claude-code-action@8ce9314fa9a404564fa7e954cd84f25bcba2b829 # v1.0.236
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
@@ -196,7 +196,7 @@ jobs:
         id: review_2
         if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.review_1.outcome == 'failure' && steps.retryable_1.outputs.retry == 'true'
         continue-on-error: true
-        uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
+        uses: anthropics/claude-code-action@8ce9314fa9a404564fa7e954cd84f25bcba2b829 # v1.0.236
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
@@ -238,7 +238,7 @@ jobs:
         id: review_3
         if: steps.token-check.outputs.skip != 'true' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.review_1.outcome == 'failure' && steps.review_2.outcome == 'failure' && steps.retryable_1.outputs.retry == 'true' && steps.retryable_2.outputs.retry == 'true'
         continue-on-error: true
-        uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
+        uses: anthropics/claude-code-action@8ce9314fa9a404564fa7e954cd84f25bcba2b829 # v1.0.236
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
