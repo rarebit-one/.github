@@ -455,8 +455,14 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app_token.outputs.token || secrets.AUTOLAND_PAT || secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
+          MAINTAINER_AUTO_MERGE: ${{ inputs.maintainer-auto-merge }}
         run: |
           # Deliberately NOT `set -e`: a blip here must be loud, not a red job.
+          # EXCEPT with `maintainer-auto-merge: false` (rarebit-sre#475): there
+          # nothing re-checks later, so an arming this step could not confirm
+          # cleared would land the PR on a repo that deploys on merge. That
+          # case fails closed below: retry once, read back, and red the job if
+          # auto-merge is not confirmed absent.
           set -uo pipefail
           armed=$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null' 2>/dev/null || echo unknown)
           case "$armed" in
@@ -470,6 +476,17 @@ jobs:
             false) : ;;
             *) echo "::warning::Could not read auto-merge state for $PR_URL — if an earlier head armed it, this head may land before its review concludes." ;;
           esac
+
+          if [ "$MAINTAINER_AUTO_MERGE" = "false" ] && [ "$armed" != "false" ]; then
+            gh pr merge --disable-auto "$PR_URL" >/dev/null 2>&1 || true
+            sleep 3
+            now=$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null' 2>/dev/null || echo unknown)
+            if [ "$now" != "false" ]; then
+              echo "::error::maintainer-auto-merge is false (rarebit-sre#475) but auto-merge on $PR_URL could not be confirmed cleared (state: $now). It may still land on its own — disable it by hand: gh pr merge --disable-auto $PR_URL"
+              exit 1
+            fi
+            echo "disarmed=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Require the review to have concluded — maintainer PR
         id: maintainer_review_gate
@@ -726,9 +743,9 @@ jobs:
           # not) nor "nothing was enabled" (it implies the gate needs widening)
           # is true. A notice, not a warning: this is the configured behaviour.
           if [ "$ACTOR" = "jaryl" ] && [ "$MAINTAINER_AUTO_MERGE" = "false" ]; then
-            echo "::notice::auto-lander: maintainer path disabled on this repo (maintainer-auto-merge: false, rarebit-sre#475) — $PR_URL will not land on its own."
+            echo "::notice::auto-lander: maintainer path disabled on this repo (maintainer-auto-merge: false, rarebit-sre#475) — this workflow did not arm $PR_URL."
             echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "⏸️ **Maintainer auto-merge is disabled for this repo** (\`maintainer-auto-merge: false\`, [rarebit-sre#475](https://github.com/rarebit-one/rarebit-sre/issues/475)). The review gate was skipped and auto-merge was not armed — read the review and merge by hand." >> "$GITHUB_STEP_SUMMARY"
+            echo "⏸️ **Maintainer auto-merge is disabled for this repo** (\`maintainer-auto-merge: false\`, [rarebit-sre#475](https://github.com/rarebit-one/rarebit-sre/issues/475)). The review gate was skipped and this workflow did not arm auto-merge — read the review and merge by hand. (If the disarm step failed, it is red: an earlier arming may still be live.)" >> "$GITHUB_STEP_SUMMARY"
           elif [ "$REVIEW_VERDICT" = "failed" ] || [ "$REVIEW_VERDICT" = "unknown" ]; then
             echo "::warning::auto-lander held $PR_URL — review gate verdict '${REVIEW_VERDICT}': ${REVIEW_DETAIL}. Merge by hand once the review has concluded."
             echo "" >> "$GITHUB_STEP_SUMMARY"
