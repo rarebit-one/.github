@@ -463,7 +463,7 @@ jobs:
           # EXCEPT with `maintainer-auto-merge: false` (rarebit-sre#475): there
           # nothing re-checks later, so an arming this step could not confirm
           # cleared would land the PR on a repo that deploys on merge. That
-          # case fails closed below: retry once, read back, and red the job if
+          # case fails closed below: disable again, read back up to 3 times, and red the job if
           # auto-merge is not confirmed absent.
           set -uo pipefail
           armed=$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null' 2>/dev/null || echo unknown)
