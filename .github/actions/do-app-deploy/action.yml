@@ -35,6 +35,22 @@ inputs:
   deploy_sha:
     description: Commit SHA (or tag) to set as the image tag on every component.
     required: true
+  components:
+    description: >-
+      Optional. Comma- or newline-separated component names to patch. Empty (the
+      default) patches EVERY service, worker and job, exactly as before. Set it
+      when one app runs images from more than one DOCR repository (e.g. a web
+      image plus a sidecar service built from a subdirectory): each promote then
+      repoints and verifies only its own components and leaves the others as
+      they are. A named component that is not in the live spec fails the run
+      with phase MISSING_COMPONENTS before anything is applied. CALLER
+      REQUIREMENT: run the promotes for one app one after another (`needs:`,
+      or one shared concurrency group with cancel-in-progress false). Each is
+      a get-patch-apply of the whole spec, so two interleaved runs can revert
+      each other's image, and the deployment-id fallback assumes no other
+      promote of the same SHA is in flight.
+    required: false
+    default: ""
   poll_timeout_seconds:
     description: How long to poll for a terminal phase before giving up. Matches doctl's internal --wait timeout.
     required: false
@@ -56,7 +72,8 @@ outputs:
       Outcome phase. ACTIVE on success; on failure one of ERROR / CANCELED /
       SUPERSEDED (DO terminal phases), TIMEOUT (polling deadline hit before a
       terminal phase), or a sentinel: INVALID_INPUT / SPEC_FETCH_FAILED /
-      PATCH_FAILED / NO_COMPONENTS (pre-deploy) or UPDATE_FAILED / PARSE_FAILED
+      PATCH_FAILED / NO_COMPONENTS / MISSING_COMPONENTS (pre-deploy) or
+      UPDATE_FAILED / PARSE_FAILED
       / NO_DEPLOY_ID (apply).
     value: ${{ steps.deploy.outputs.phase || steps.patch_spec.outputs.phase }}
   outcome:
@@ -73,6 +90,7 @@ runs:
         APP_ID: ${{ inputs.app_id }}
         IMAGE_REPO: ${{ inputs.image_repo }}
         DEPLOY_SHA: ${{ inputs.deploy_sha }}
+        COMPONENTS: ${{ inputs.components }}
       run: |
         set -uo pipefail
         # Like the deploy step, this step NEVER exits non-zero: pre-flight and
@@ -112,10 +130,43 @@ runs:
           fail "SPEC_FETCH_FAILED"
         fi
 
+        # Optional component filter (`components` input). NAMES_JSON is a JSON
+        # array of names; `[]` means "every component", which is the
+        # pre-existing behaviour and the default.
+        NAMES_JSON=$(printf '%s' "$COMPONENTS" | tr ',' '\n' \
+          | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d' | jq -R . | jq -sc 'unique')
+        [ -n "$NAMES_JSON" ] || NAMES_JSON='[]'
+        # A value that is set but names nothing (e.g. "," or only blanks) is a
+        # caller mistake, and treating it as "every component" is exactly the
+        # multi-image breakage this input prevents. Fail it instead. (An unset
+        # or empty value still means every component: that is the default.)
+        if [ "$NAMES_JSON" = "[]" ] && [ -n "$COMPONENTS" ]; then
+          echo "::error::'components' is set but names no component (got '$COMPONENTS')"
+          fail "INVALID_INPUT"
+        fi
+        export NAMES_JSON
+        # Handed to the deploy step, so the name list is parsed in one place.
+        emit names_json "$NAMES_JSON"
+        if [ "$NAMES_JSON" != "[]" ]; then
+          MISSING=$(yq -o=json '[.services[], .workers[], .jobs[]] | map(.name)' /tmp/spec.yaml 2>/dev/null \
+            | jq -r --argjson want "$NAMES_JSON" '($want - .) | join(",")' 2>/dev/null) || MISSING="(could not read component names)"
+          if [ -n "$MISSING" ]; then
+            echo "::error::components named in the 'components' input are not in the live spec for $APP_ID: $MISSING"
+            fail "MISSING_COMPONENTS"
+          fi
+          echo "Patching only the named components: $(echo "$NAMES_JSON" | jq -r 'join(", ")')"
+        fi
+
         # `mikefarah/yq` is preinstalled on ubuntu-latest. `strenv()` is
-        # the safe way to interpolate env vars into a yq expression.
+        # the safe way to interpolate env vars into a yq expression;
+        # `env(NAMES_JSON)` parses the name list as an array. Names are
+        # matched EXACTLY (`map(select(. == $n))`): yq's `contains` on a string
+        # array matches substrings, so `["agent-service"] | contains(["agent"])`
+        # is true and would repoint a component called `agent` too.
         if ! yq -i '
-          (.services[], .workers[], .jobs[]) |= (
+          ((.services[], .workers[], .jobs[])
+            | select((env(NAMES_JSON) | length) == 0 or (.name as $n | env(NAMES_JSON) | map(select(. == $n)) | length > 0))
+          ) |= (
             del(.dockerfile_path, .source_dir, .github) |
             .image = {
               "registry_type": "DOCR",
@@ -131,7 +182,9 @@ runs:
         # A wrong app_id can resolve to a component-less app: the patch above
         # would then be a silent no-op and we'd deploy an unmodified spec.
         # Require at least one component to have been patched.
-        PATCHED=$(yq -r '[.services[], .workers[], .jobs[]] | length' /tmp/spec.yaml 2>/dev/null)
+        PATCHED=$(yq -r '[.services[], .workers[], .jobs[]]
+          | map(select((env(NAMES_JSON) | length) == 0 or (.name as $n | env(NAMES_JSON) | map(select(. == $n)) | length > 0)))
+          | length' /tmp/spec.yaml 2>/dev/null)
         [[ "$PATCHED" =~ ^[0-9]+$ ]] || PATCHED=0
         if [ "$PATCHED" -eq 0 ]; then
           echo "::error::appspec for $APP_ID has no services/workers/jobs to patch — wrong app_id?"
@@ -143,6 +196,7 @@ runs:
         # or a non-DOCR registry_type) is also caught.
         UNEXPECTED=$(yq -r '
           [.services[], .workers[], .jobs[]]
+          | map(select((env(NAMES_JSON) | length) == 0 or (.name as $n | env(NAMES_JSON) | map(select(. == $n)) | length > 0)))
           | map(select(.image.registry_type != "DOCR" or .image.repository != strenv(IMAGE_REPO) or .image.tag != strenv(DEPLOY_SHA)) | .name)
           | join(",")
         ' /tmp/spec.yaml)
@@ -177,6 +231,8 @@ runs:
         # and the caller gets an empty phase instead of a diagnosable one.
         IMAGE_REPO: ${{ inputs.image_repo }}
         DEPLOY_SHA: ${{ inputs.deploy_sha }}
+        # The parsed `components` list from patch_spec (a JSON array; `[]` = all).
+        NAMES_JSON: ${{ steps.patch_spec.outputs.names_json }}
       run: |
         set -uo pipefail
         # This step NEVER exits non-zero (see the action description): it
@@ -284,21 +340,31 @@ runs:
         #   1. created_at >= the instant we sent the update (no pre-existing
         #      deployment can qualify), and
         #   2. EVERY component pinned to $IMAGE_REPO:$DEPLOY_SHA (a rollback to
-        #      a different image is excluded by construction).
+        #      a different image is excluded by construction). With the
+        #      `components` input set, "every" means every NAMED component: the
+        #      others legitimately run other images.
         # Then take the OLDEST match — if a rollback of our own deploy somehow
         # also matched, ours was created first.
+        printf '%s' "$NAMES_JSON" | jq -e 'type == "array"' >/dev/null 2>&1 || NAMES_JSON='[]'
         if [ -z "$DEPLOY_ID" ]; then
           echo "::warning::apps update returned no in_progress_deployment.id — resolving the deployment by identity (see comment). This is a known DO race, not a failure."
           for attempt in 1 2 3 4 5 6; do
             sleep 5
             LIST_JSON=$(doctl apps list-deployments "$APP_ID" --output json 2>/dev/null) || LIST_JSON='[]'
             DEPLOY_ID=$(echo "$LIST_JSON" | jq -r \
-              --arg since "$UPDATE_SENT_AT" --arg repo "$IMAGE_REPO" --arg sha "$DEPLOY_SHA" '
+              --arg since "$UPDATE_SENT_AT" --arg repo "$IMAGE_REPO" --arg sha "$DEPLOY_SHA" \
+              --argjson names "$NAMES_JSON" '
               [ .[]
                 | select(.created_at >= $since)
                 | select(
-                    ( [ (.spec.services // [])[], (.spec.workers // [])[], (.spec.jobs // [])[] ] ) as $c
-                    | ($c | length) > 0
+                    ( [ (.spec.services // [])[], (.spec.workers // [])[], (.spec.jobs // [])[] ]
+                      | if ($names | length) > 0 then map(select(.name as $n | $names | index($n))) else . end
+                    ) as $c
+                    # Filtered: the candidate must carry EVERY named component
+                    # (a spec missing one is some other deployment).
+                    | (if ($names | length) > 0
+                       then ([$c[].name] | unique) == ($names | unique)
+                       else ($c | length) > 0 end)
                       and ($c | all(.image.repository == $repo and .image.tag == $sha))
                   )
               ] | sort_by(.created_at) | first | .id // ""')
