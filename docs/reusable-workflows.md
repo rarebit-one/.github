@@ -156,6 +156,33 @@ which rung was used is visible on each PR without reading the log.
 **Callers must pass `secrets: inherit`** — without it `RELEASE_BOT_PRIVATE_KEY`
 never reaches the reusable and the App rung drops silently to the next one.
 
+### Turning the maintainer path off: `maintainer-auto-merge` (rarebit-sre#475)
+
+The maintainer path arms auto-merge once the review check has *concluded without
+failing*. That is weaker than "the review found nothing": a review that passes
+with advisory findings still arms it, so an agent session can land its own PR
+before anyone deals with those findings. On a repo that deploys on merge, that
+change then goes straight out.
+
+Until the gate reads the review's own verdict (see rarebit-sre#475), a caller can
+switch the arming off:
+
+```yaml
+    uses: rarebit-one/.github/.github/workflows/dependabot-auto-merge.yml@main
+    with:
+      maintainer-auto-merge: false
+    secrets: inherit
+```
+
+With `false`, a maintainer PR is **disarmed** (auto-merge from an earlier head,
+or one set by hand, is cleared), the review gate is skipped, nothing is armed,
+and the decision summary says the path is disabled. If the disarm cannot be
+confirmed (the call fails, or a read-back still shows auto-merge on), the lander
+job goes **red**: an arming may still be live, so disable it by hand with
+`gh pr merge --disable-auto <PR>`. Dependabot and SRE-engine PRs on the same
+repo are unaffected. The default is `true`. Set to `false` on
+`jumpdrive-web` and `jumpdrive-runner`.
+
 ### The `anthropics/claude-code-action` exemption (org convention)
 
 We pin `anthropics/claude-code-action` to a **main-branch commit** (ahead of the

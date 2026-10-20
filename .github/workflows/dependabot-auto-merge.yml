@@ -131,6 +131,27 @@ on:
           review VERDICT.
         type: number
         default: 600
+      maintainer-auto-merge:
+        description: >-
+          Controls whether the maintainer path is allowed to ARM auto-merge on
+          this repo. Default `true` leaves existing behaviour intact. Set to
+          `false` on repos that deploy on merge (e.g. jumpdrive-web,
+          jumpdrive-runner) so that every maintainer-authored PR requires a
+          deliberate human merge action, regardless of the review verdict.
+          When false: the disarm step still runs (any earlier auto-merge, from
+          an earlier head or set by hand, is cleared), the review gate is
+          skipped (its verdict would have no consumer), the enable step is
+          SUPPRESSED, and the step summary says the path is disabled and why.
+          If the disarm cannot be confirmed the job goes RED: an earlier
+          arming may still be live, so disable it by hand.
+          Dependabot and SRE-engine PRs on the same repo are unaffected.
+          Background: rarebit-one/rarebit-sre#475 — the maintainer path was
+          arming auto-merge as soon as the review check concluded, even when the
+          review reported unaddressed findings. This flag is the STOPGAP while
+          the full fix (arm only when blocking=0 advisory=0 per the
+          REVIEW-VERDICT line) is designed and implemented.
+        type: boolean
+        default: true
 
 jobs:
   auto-merge:
@@ -200,6 +221,15 @@ jobs:
     # checks there is nothing left to wait for, so "auto-merge" means merge on
     # open. Callers that opt into the maintainer path should have branch
     # protection with at least the CI check required.
+    #
+    # KNOWN GAP — rarebit-sre#475 (2026-10-20): "the review concluded and did
+    # not FAIL" is weaker than "the review found nothing". A review that
+    # concludes green while reporting advisory findings still arms auto-merge,
+    # so an agent session can land a PR before anyone deals with them. Until
+    # the gate reads the review's own verdict (blocking/advisory counts), the
+    # caller input `maintainer-auto-merge: false` turns the arming off for
+    # repos that DEPLOY ON MERGE (jumpdrive-web, jumpdrive-runner). Dependabot
+    # and SRE-engine PRs on those repos still land as before.
     if: >-
       github.actor == 'dependabot[bot]' ||
       (github.actor == 'rarebit-one[bot]' && (
@@ -419,21 +449,33 @@ jobs:
         # Disarm FIRST; the enable step below re-arms only on a fresh `clean`
         # verdict for THIS head. Consequence, stated: on `failed` or `unknown`
         # the PR stays disarmed, including an arming the maintainer set by hand
-        # — re-arm it by hand after reading the review.
+        # — re-arm it by hand after reading the review. It runs whatever the
+        # `maintainer-auto-merge` input says: with the input false nothing
+        # re-arms, so clearing an earlier arming matters more, not less.
         id: maintainer_disarm
         if: github.actor == 'jaryl'
         env:
           GH_TOKEN: ${{ steps.app_token.outputs.token || secrets.AUTOLAND_PAT || secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
+          MAINTAINER_AUTO_MERGE: ${{ inputs.maintainer-auto-merge }}
         run: |
           # Deliberately NOT `set -e`: a blip here must be loud, not a red job.
+          # EXCEPT with `maintainer-auto-merge: false` (rarebit-sre#475): there
+          # nothing re-checks later, so an arming this step could not confirm
+          # cleared would land the PR on a repo that deploys on merge. That
+          # case fails closed below: disable again, read back up to 3 times, and red the job if
+          # auto-merge is not confirmed absent.
           set -uo pipefail
           armed=$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null' 2>/dev/null || echo unknown)
           case "$armed" in
             true)
               if gh pr merge --disable-auto "$PR_URL"; then
                 echo "disarmed=true" >> "$GITHUB_OUTPUT"
-                echo "Auto-merge from an earlier head was **disarmed** pending this head's review." >> "$GITHUB_STEP_SUMMARY"
+                if [ "$MAINTAINER_AUTO_MERGE" = "false" ]; then
+                  echo "Auto-merge from an earlier arming was **disarmed** (maintainer-auto-merge is off here)." >> "$GITHUB_STEP_SUMMARY"
+                else
+                  echo "Auto-merge from an earlier head was **disarmed** pending this head's review." >> "$GITHUB_STEP_SUMMARY"
+                fi
               else
                 echo "::warning::Could not disarm the existing auto-merge on $PR_URL — an earlier arming may land this head before its review concludes."
               fi ;;
@@ -441,9 +483,32 @@ jobs:
             *) echo "::warning::Could not read auto-merge state for $PR_URL — if an earlier head armed it, this head may land before its review concludes." ;;
           esac
 
+          if [ "$MAINTAINER_AUTO_MERGE" = "false" ] && [ "$armed" != "false" ]; then
+            gh pr merge --disable-auto "$PR_URL" >/dev/null 2>&1 || true
+            # read back a few times: a lagging read must not red a disarm that worked
+            for _ in 1 2 3; do
+              sleep 3
+              now=$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null' 2>/dev/null || echo unknown)
+              [ "$now" = "false" ] && break
+            done
+            if [ "$now" != "false" ]; then
+              echo "::error::maintainer-auto-merge is false (rarebit-sre#475) but auto-merge on $PR_URL could not be confirmed cleared (state: $now). It may still land on its own — disable it by hand: gh pr merge --disable-auto $PR_URL"
+              exit 1
+            fi
+            # (an `&&` chain here would leave a non-zero status as the step's last)
+            if [ "$armed" = "true" ] && ! grep -q '^disarmed=true$' "$GITHUB_OUTPUT" 2>/dev/null; then
+              echo "disarmed=true" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
       - name: Require the review to have concluded — maintainer PR
         id: maintainer_review_gate
-        if: github.actor == 'jaryl'
+        # Skipped when `maintainer-auto-merge` is false (rarebit-sre#475): the
+        # verdict's ONLY consumer is the enable step, which is suppressed then,
+        # so polling would spend up to maintainer-review-timeout-seconds of
+        # runner time per push deciding nothing. The review check itself still
+        # shows on the PR. The reporter below records the path as disabled.
+        if: github.actor == 'jaryl' && inputs.maintainer-auto-merge
         env:
           # The check-runs read uses the release-bot App token (minted above
           # with `permission-checks: read`), falling back to the ambient token.
@@ -608,7 +673,17 @@ jobs:
         # not-a-draft; this narrows the step to that path, and additionally
         # requires the review to have CONCLUDED CLEANLY (see the step above and
         # the MAINTAINER PATH note on the job).
-        if: github.actor == 'jaryl' && steps.maintainer_review_gate.outputs.verdict == 'clean'
+        # `inputs.maintainer-auto-merge` is the STOPGAP gate (rarebit-sre#475):
+        # when a caller passes `maintainer-auto-merge: false` (e.g.
+        # jumpdrive-web, jumpdrive-runner), this step is SUPPRESSED and the PR
+        # is never queued to land automatically. (The review gate is
+        # skipped too, so its verdict is empty and this condition is already
+        # false; the explicit input guard keeps the intent legible and safe if
+        # the gate's `if` ever changes.) The disarm step still runs.
+        if: >-
+          github.actor == 'jaryl' &&
+          steps.maintainer_review_gate.outputs.verdict == 'clean' &&
+          inputs.maintainer-auto-merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MERGE_TOKEN: ${{ steps.app_token.outputs.token || secrets.AUTOLAND_PAT || secrets.GITHUB_TOKEN }}
@@ -646,6 +721,7 @@ jobs:
           MAINTAINER_OUTCOME: ${{ steps.maintainer_enable.outcome }}
           REVIEW_VERDICT: ${{ steps.maintainer_review_gate.outputs.verdict }}
           REVIEW_DETAIL: ${{ steps.maintainer_review_gate.outputs.detail }}
+          MAINTAINER_AUTO_MERGE: ${{ inputs.maintainer-auto-merge }}
           MERGE_TOKEN_MODE: ${{ steps.token.outputs.mode }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           ACTOR: ${{ github.actor }}
@@ -664,6 +740,7 @@ jobs:
             echo "| engine step | ${ENGINE_OUTCOME} |"
             echo "| maintainer step | ${MAINTAINER_OUTCOME} |"
             echo "| maintainer review gate | ${REVIEW_VERDICT:-n/a} — ${REVIEW_DETAIL:-—} |"
+            echo "| maintainer-auto-merge | ${MAINTAINER_AUTO_MERGE} |"
             echo "| merge token | ${MERGE_TOKEN_MODE:-unknown} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -671,7 +748,18 @@ jobs:
           # "the gate didn't match anything", and must not be reported as the
           # generic nothing-was-enabled case below — that message tells you to
           # widen the gate, which is the opposite of what happened here.
-          if [ "$REVIEW_VERDICT" = "failed" ] || [ "$REVIEW_VERDICT" = "unknown" ]; then
+          #
+          # A maintainer PR on a repo whose caller set `maintainer-auto-merge:
+          # false` (rarebit-sre#475) is a THIRD distinct outcome and is checked
+          # first: the gate was skipped by design, so neither "held by the
+          # review gate" (it implies a clean review would land it — it would
+          # not) nor "nothing was enabled" (it implies the gate needs widening)
+          # is true. A notice, not a warning: this is the configured behaviour.
+          if [ "$ACTOR" = "jaryl" ] && [ "$MAINTAINER_AUTO_MERGE" = "false" ]; then
+            echo "::notice::auto-lander: maintainer path disabled on this repo (maintainer-auto-merge: false, rarebit-sre#475) — this workflow did not arm $PR_URL."
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "⏸️ **Maintainer auto-merge is disabled for this repo** (\`maintainer-auto-merge: false\`, [rarebit-sre#475](https://github.com/rarebit-one/rarebit-sre/issues/475)). The review gate was skipped and this workflow did not arm auto-merge — read the review and merge by hand. (If the disarm step failed, it is red: an earlier arming may still be live.)" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$REVIEW_VERDICT" = "failed" ] || [ "$REVIEW_VERDICT" = "unknown" ]; then
             echo "::warning::auto-lander held $PR_URL — review gate verdict '${REVIEW_VERDICT}': ${REVIEW_DETAIL}. Merge by hand once the review has concluded."
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "🛑 **Held by the review gate (${REVIEW_VERDICT}).** This PR will not land on its own until a review has concluded cleanly — merge it by hand if you are satisfied without one." >> "$GITHUB_STEP_SUMMARY"
