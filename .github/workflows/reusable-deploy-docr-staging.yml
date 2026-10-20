@@ -176,6 +176,17 @@ on:
         required: false
         type: string
         default: "1800"
+      components:
+        description: >-
+          Optional comma- or newline-separated component names to promote.
+          Empty (the default) repoints EVERY service, worker and job, as before.
+          Set it when the app runs images from more than one DOCR repository:
+          each caller then promotes only its own components (do-app-deploy's
+          `components` input). Serialise such callers (`needs:`), because each
+          promote is a read-modify-write of the same live spec.
+        required: false
+        type: string
+        default: ""
     secrets:
       DIGITALOCEAN_ACCESS_TOKEN:
         description: >-
@@ -505,6 +516,7 @@ jobs:
           APP_ID: ${{ secrets.DO_APP_ID }}
           IMAGE_REPO: ${{ inputs.image_repo }}
           DEPLOY_SHA: ${{ inputs.deploy_sha }}
+          COMPONENTS: ${{ inputs.components }}
         run: |
           set -uo pipefail
           if ! doctl apps spec get "$APP_ID" --format json > /tmp/live-spec.json 2>/tmp/spec-err; then
@@ -543,7 +555,23 @@ jobs:
             echo "Before arming: drop or hardcode that env var on the live app, and pass the SHA through \`build_args\` instead (the image bakes it in)."
           fi
 
-          echo "Every component above WOULD be repointed to:"
+          if [ -n "$COMPONENTS" ] && [ -z "$(printf '%s' "$COMPONENTS" | tr -d '[:space:],')" ]; then
+            # Same rule as do-app-deploy: set but naming nothing is a mistake.
+            echo "::warning::'components' is set but names no component (got '${COMPONENTS}'); an armed run stops with INVALID_INPUT"
+          elif [ -n "$(printf '%s' "$COMPONENTS" | tr -d '[:space:],')" ]; then
+            NAMES=$(printf '%s' "$COMPONENTS" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d' | paste -sd, -)
+            MISSING=$(jq -r --arg names "$NAMES" '
+              ($names | split(",")) - [(.services // [])[], (.workers // [])[], (.jobs // [])[] | .name]
+              | join(",")' /tmp/live-spec.json 2>/dev/null || echo "")
+            if [ -n "$MISSING" ]; then
+              echo "::warning::components not in the live spec (an armed run would stop with MISSING_COMPONENTS): ${MISSING}"
+            fi
+            echo "Only these components WOULD be repointed: ${NAMES}"
+            echo "Every other component keeps its current image."
+            echo "They WOULD be repointed to:"
+          else
+            echo "Every component above WOULD be repointed to:"
+          fi
           echo "    registry_type: DOCR"
           echo "    repository:    ${IMAGE_REPO}"
           echo "    tag:           ${DEPLOY_SHA}"
@@ -603,12 +631,13 @@ jobs:
         # resolves against the CALLER's checkout inside a reusable workflow.
         # This composite never exits non-zero — it reports via outputs, and the
         # gate step below is what fails the job.
-        uses: rarebit-one/.github/.github/actions/do-app-deploy@4c38b61d265fd7f55af016e8dc3ea3632674aa63
+        uses: rarebit-one/.github/.github/actions/do-app-deploy@37133c0b2dbc8d166da45caa3b4ba9c6c7a701f3
         with:
           app_id: ${{ secrets.DO_APP_ID }}
           image_repo: ${{ inputs.image_repo }}
           deploy_sha: ${{ inputs.deploy_sha }}
           poll_timeout_seconds: ${{ inputs.poll_timeout_seconds }}
+          components: ${{ inputs.components }}
 
       - name: Gate — an ARMED run must actually have promoted something
         if: ${{ inputs.docr_live == 'true' }}
