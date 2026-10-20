@@ -447,19 +447,14 @@ jobs:
         # Disarm FIRST; the enable step below re-arms only on a fresh `clean`
         # verdict for THIS head. Consequence, stated: on `failed` or `unknown`
         # the PR stays disarmed, including an arming the maintainer set by hand
-        # — re-arm it by hand after reading the review.
-        #
-        # This step runs unconditionally for all maintainer PRs regardless of
-        # the `maintainer-auto-merge` input: when that input is false the
-        # ENABLE step is suppressed, but we still want to clear any earlier
-        # arming so the PR does not land on its own. The note appended at the
-        # bottom of the run script makes the suppression visible in the summary.
+        # — re-arm it by hand after reading the review. It runs whatever the
+        # `maintainer-auto-merge` input says: with the input false nothing
+        # re-arms, so clearing an earlier arming matters more, not less.
         id: maintainer_disarm
         if: github.actor == 'jaryl'
         env:
           GH_TOKEN: ${{ steps.app_token.outputs.token || secrets.AUTOLAND_PAT || secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
-          AUTO_MERGE_ENABLED: ${{ inputs.maintainer-auto-merge }}
         run: |
           # Deliberately NOT `set -e`: a blip here must be loud, not a red job.
           set -uo pipefail
@@ -475,16 +470,6 @@ jobs:
             false) : ;;
             *) echo "::warning::Could not read auto-merge state for $PR_URL — if an earlier head armed it, this head may land before its review concludes." ;;
           esac
-
-          # maintainer-auto-merge=false: disarm ran above, but the enable step
-          # is suppressed for this repo (rarebit-sre#475 stopgap). Emit a
-          # summary note so it is legible in the job output.
-          if [ "$AUTO_MERGE_ENABLED" = "false" ]; then
-            {
-              echo ""
-              echo "> ⚠️ **\`maintainer-auto-merge\` is disabled for this repo ([rarebit-sre#475](https://github.com/rarebit-one/rarebit-sre/issues/475)).** The disarm above ran to clear any earlier arming, but re-arming is suppressed — this PR will not land automatically. Merge it by hand once you are satisfied with the review."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
 
       - name: Require the review to have concluded — maintainer PR
         id: maintainer_review_gate
