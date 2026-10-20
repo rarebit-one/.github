@@ -176,8 +176,11 @@ switch the arming off:
 
 With `false`, a maintainer PR is **disarmed** (auto-merge from an earlier head,
 or one set by hand, is cleared), the review gate is skipped, nothing is armed,
-and the decision summary says the path is disabled. Dependabot and SRE-engine
-PRs on the same repo are unaffected. The default is `true`. Set to `false` on
+and the decision summary says the path is disabled. If the disarm cannot be
+confirmed (the call fails, or a read-back still shows auto-merge on), the lander
+job goes **red**: an arming may still be live, so disable it by hand with
+`gh pr merge --disable-auto <PR>`. Dependabot and SRE-engine PRs on the same
+repo are unaffected. The default is `true`. Set to `false` on
 `jumpdrive-web` and `jumpdrive-runner`.
 
 ### The `anthropics/claude-code-action` exemption (org convention)

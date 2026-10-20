@@ -469,7 +469,11 @@ jobs:
             true)
               if gh pr merge --disable-auto "$PR_URL"; then
                 echo "disarmed=true" >> "$GITHUB_OUTPUT"
-                echo "Auto-merge from an earlier head was **disarmed** pending this head's review." >> "$GITHUB_STEP_SUMMARY"
+                if [ "$MAINTAINER_AUTO_MERGE" = "false" ]; then
+                  echo "Auto-merge from an earlier arming was **disarmed** (maintainer-auto-merge is off here)." >> "$GITHUB_STEP_SUMMARY"
+                else
+                  echo "Auto-merge from an earlier head was **disarmed** pending this head's review." >> "$GITHUB_STEP_SUMMARY"
+                fi
               else
                 echo "::warning::Could not disarm the existing auto-merge on $PR_URL — an earlier arming may land this head before its review concludes."
               fi ;;
@@ -479,8 +483,12 @@ jobs:
 
           if [ "$MAINTAINER_AUTO_MERGE" = "false" ] && [ "$armed" != "false" ]; then
             gh pr merge --disable-auto "$PR_URL" >/dev/null 2>&1 || true
-            sleep 3
-            now=$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null' 2>/dev/null || echo unknown)
+            # read back a few times: a lagging read must not red a disarm that worked
+            for _ in 1 2 3; do
+              sleep 3
+              now=$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null' 2>/dev/null || echo unknown)
+              [ "$now" = "false" ] && break
+            done
             if [ "$now" != "false" ]; then
               echo "::error::maintainer-auto-merge is false (rarebit-sre#475) but auto-merge on $PR_URL could not be confirmed cleared (state: $now). It may still land on its own — disable it by hand: gh pr merge --disable-auto $PR_URL"
               exit 1
