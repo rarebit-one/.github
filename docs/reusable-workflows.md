@@ -893,6 +893,7 @@ both.
 | `docr_live` | no | `""` | Arming gate. Pass a repo variable so arming is a `gh variable` command, never a code change. |
 | `free_disk_space` | no | `false` | Reclaims ~10 GiB. Runners have ~14 GiB free vs DO's builder's 24 GiB. |
 | `poll_timeout_seconds` | no | `1800` | Terminal-phase poll budget. |
+| `components` | no | `""` | Comma/newline-separated component names to promote. Empty repoints every component (the original behaviour). Set it when one app runs images from several DOCR repositories, and serialise those callers with `needs:`. A name missing from the live spec stops an armed run with `MISSING_COMPONENTS`, and a set value naming nothing (`,`, blanks) with `INVALID_INPUT`. Empty means *all*, so don't feed it from an optional variable: an unset `vars.X` arrives as empty. |
 
 ### Secrets
 
