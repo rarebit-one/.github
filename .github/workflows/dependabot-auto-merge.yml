@@ -142,6 +142,8 @@ on:
           an earlier head or set by hand, is cleared), the review gate is
           skipped (its verdict would have no consumer), the enable step is
           SUPPRESSED, and the step summary says the path is disabled and why.
+          If the disarm cannot be confirmed the job goes RED: an earlier
+          arming may still be live, so disable it by hand.
           Dependabot and SRE-engine PRs on the same repo are unaffected.
           Background: rarebit-one/rarebit-sre#475 — the maintainer path was
           arming auto-merge as soon as the review check concluded, even when the
@@ -493,7 +495,10 @@ jobs:
               echo "::error::maintainer-auto-merge is false (rarebit-sre#475) but auto-merge on $PR_URL could not be confirmed cleared (state: $now). It may still land on its own — disable it by hand: gh pr merge --disable-auto $PR_URL"
               exit 1
             fi
-            echo "disarmed=true" >> "$GITHUB_OUTPUT"
+            # (an `&&` chain here would leave a non-zero status as the step's last)
+            if [ "$armed" = "true" ] && ! grep -q '^disarmed=true$' "$GITHUB_OUTPUT" 2>/dev/null; then
+              echo "disarmed=true" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
       - name: Require the review to have concluded — maintainer PR
