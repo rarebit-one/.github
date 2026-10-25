@@ -625,7 +625,7 @@ jobs:
               # Fetch all PR comments from the Codex bot (one per push).
               # `tail -1` picks the most recent codex-review-state line when
               # multiple pushes have been reviewed.
-              comment_line=$(gh api "/repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" \
+              comment_line=$(gh api "/repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
                 --jq '.[] | select(.user.login == "chatgpt-codex-connector[bot]") | .body' 2>/dev/null \
                 | grep 'codex-review-state:v1' | tail -1 || true)
 
@@ -638,7 +638,7 @@ jobs:
                 status=$(printf '%s' "$state_json" | jq -r '.code_review.status // ""' 2>/dev/null || true)
 
                 if [ "$commit_sha" = "$HEAD_SHA" ] && [ "$status" = "completed" ]; then
-                  has_unresolved=$(printf '%s' "$state_json" | jq -r '.code_review.has_unresolved_findings // true' 2>/dev/null || echo true)
+                  has_unresolved=$(printf '%s' "$state_json" | jq -r 'if .code_review.has_unresolved_findings == false then "false" else "true" end' 2>/dev/null || echo true)
                   if [ "$has_unresolved" = "false" ]; then
                     verdict=clean
                     detail="Codex review completed with no unresolved findings on $HEAD_SHA"
