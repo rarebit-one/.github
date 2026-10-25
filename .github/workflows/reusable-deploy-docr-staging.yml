@@ -631,7 +631,7 @@ jobs:
         # resolves against the CALLER's checkout inside a reusable workflow.
         # This composite never exits non-zero — it reports via outputs, and the
         # gate step below is what fails the job.
-        uses: rarebit-one/.github/.github/actions/do-app-deploy@37133c0b2dbc8d166da45caa3b4ba9c6c7a701f3
+        uses: rarebit-one/.github/.github/actions/do-app-deploy@fd55eae5e002fed1ccb54452258757d216e614e8
         with:
           app_id: ${{ secrets.DO_APP_ID }}
           image_repo: ${{ inputs.image_repo }}
