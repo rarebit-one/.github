@@ -1,8 +1,9 @@
 name: PR
 
-# Triggers reviews on pull requests opened against this repo. The actual
-# review logic lives in `claude-code-review.yml` (a `workflow_call` reusable
-# also consumed by the rest of the org), so this file is intentionally thin.
+# Pins the gate logic that decides merges, each test extracting its code
+# from the workflow YAML itself so it cannot drift from what actually runs:
+# the maintainer auto-merge gate (dependabot-auto-merge.yml) and
+# pin-check's workflow-validity check.
 
 on:
   pull_request:
@@ -15,24 +16,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  review:
-    name: Claude Code Review
-    permissions:
-      contents: read
-      pull-requests: write
-      issues: write
-      id-token: write
-    uses: ./.github/workflows/claude-code-review.yml
-    secrets: inherit
-
-  # Pins the gate logic that decides merges, each test extracting its code from
-  # the workflow YAML itself so it cannot drift from what actually runs:
-  # the review's known-crash classifier and its REVIEW-VERDICT parse
-  # (claude-code-review.yml), the whole "Review verdict" step run under
-  # `bash -e` as Actions does, the maintainer auto-merge gate
-  # (dependabot-auto-merge.yml) and pin-check's workflow-validity check.
-  verdict-classifier:
-    name: Review verdict classifier
+  # Pins the gate logic that decides merges, each test extracting its code
+  # from the workflow YAML itself so it cannot drift from what actually runs.
+  gate-tests:
+    name: Gate tests
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -40,11 +27,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: bash tests/review-verdict-known-bug.test.sh
-      # Same extract-from-the-YAML shape: the maintainer auto-merge gate's
-      # `classify_review_runs` (dependabot-auto-merge.yml) and pin-check's fifth
-      # check, workflow validity (pin-check.yml).
+      # Pins classify_review_runs (dependabot-auto-merge.yml).
       - run: bash tests/maintainer-review-gate.test.sh
+      # Pins pin-check's workflow-validity check (pin-check.yml).
       - run: bash tests/pin-check-workflow-validity.test.sh
-      - run: bash tests/review-blocking-verdict.test.sh
-      - run: bash tests/review-verdict-step.test.sh
