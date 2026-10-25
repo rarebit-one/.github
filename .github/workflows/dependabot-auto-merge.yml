@@ -110,19 +110,27 @@ on:
         default: 'ubuntu-latest'
       maintainer-review-check:
         description: >-
-          Name of the code-review check that must have CONCLUDED before the
-          maintainer path enables auto-merge. See the MAINTAINER PATH note on
-          the `auto-merge` job: the actor gate authenticates who pushed, not
-          who wrote the diff, so the review concluding is what actually
-          distinguishes a reviewed PR from an unreviewed one.
-          Matched EXACTLY or as a "<caller job name> / <this>" suffix, because a
-          `workflow_call` job's check-run carries the caller's job name as a
-          prefix (`review / Claude Code Review`, `Claude Code Review / Claude
-          Code Review`) — pass the full composite string to pin one precisely.
-          Set to an empty string ONLY on a repo that runs no code review at all — that restores
-          the old fail-open behaviour and is reported as such in the summary.
+          Controls how the maintainer gate waits for a code review before
+          enabling auto-merge. Two modes:
+
+          EMPTY STRING (default) — Codex gate: polls chatgpt-codex-connector[bot]'s
+          `codex-review-state` PR comment for `code_review.status == "completed"`
+          on the exact head SHA. Enables auto-merge when
+          `has_unresolved_findings` is false; holds on true (unresolved
+          findings) or unknown (no comment yet / timeout). This is the right
+          default for every repo where Codex is the primary reviewer.
+
+          NON-EMPTY STRING — named check-run gate: waits for a check-run
+          whose name equals this string, or whose name ends with
+          "/ <this string>" (the workflow_call suffix). Use this for repos
+          whose binding review gate is a required status check, not a Codex
+          comment — e.g. `review/clear` on rarebit-static-v3.
+
+          The new logic must never let a PR merge with no review at all:
+          an absent or timed-out Codex comment reads as `unknown` and holds
+          the PR for a human, same as a missing check-run did before.
         type: string
-        default: 'Claude Code Review'
+        default: ''
       maintainer-review-timeout-seconds:
         description: >-
           How long to wait for that check to conclude before giving up and
@@ -510,142 +518,146 @@ jobs:
         # shows on the PR. The reporter below records the path as disabled.
         if: github.actor == 'jaryl' && inputs.maintainer-auto-merge
         env:
-          # The check-runs read uses the release-bot App token (minted above
-          # with `permission-checks: read`), falling back to the ambient token.
-          # This is what removes the need for the job — and every caller — to
-          # grant `checks: read`, which is what caused the estate-wide
-          # startup_failure (DEP-001). If the App token is empty the fallback
-          # GITHUB_TOKEN has no checks scope, the read fails, and the gate lands
-          # on `unknown` and holds the PR — the intended safe degrade.
+          # For the named-check path: the App token (minted above with
+          # `permission-checks: read`) lets us read check-runs without the job
+          # or every caller granting `checks: read` (what caused DEP-001).
+          # For the Codex path: the App token or the ambient token works; PR
+          # comments require only `pull-requests: read` which is already in
+          # scope. In both cases an empty token safely degrades to unknown.
           GH_TOKEN: ${{ steps.app_token.outputs.token || secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           CHECK_NAME: ${{ inputs.maintainer-review-check }}
           TIMEOUT_S: ${{ inputs.maintainer-review-timeout-seconds }}
         run: |
-          # THREE outcomes, not two. The defect this closes was a gate with
-          # only "merge" and "don't merge", where "the review has not answered
-          # yet" was indistinguishable from "the review was fine" — so the
-          # absence of a verdict read as a pass. Per
-          # `.claude/conventions/check-positive-controls.md`, a check that has
-          # not returned is UNVERIFIED, never negative.
+          # THREE outcomes, not two. Per check-positive-controls.md, a check
+          # that has not returned is UNVERIFIED, never implicitly clean.
           #
-          #   clean    → the review concluded and did not fail  → enable
-          #   failed   → the review concluded and failed        → do not enable
-          #   unknown  → absent, timed out, or unreadable       → do not enable
-          #
-          # KNOWN LIMIT, stated rather than papered over: `clean` means the
-          # review check concluded green, which is NOT identical to "a review
-          # ran". `claude-code-review.yml`'s job deliberately concludes green
-          # without spending LLM budget on a Dependabot PR, and its
-          # `token-check` does the same when `CLAUDE_CODE_OAUTH_TOKEN` is
-          # missing. So on a repo where that secret is not wired up, a
-          # maintainer PR reads as reviewed with no review having happened —
-          # the same absence-reads-as-clean shape this gate closes, one layer
-          # down, in a check this workflow does not own. Closing it properly
-          # means the review job distinguishing "reviewed" from "skipped" in
-          # its own conclusion; until then, wiring the secret is a
-          # prerequisite for trusting this gate, not an optional extra.
+          #   clean   → review concluded without unresolved issues → enable
+          #   failed  → review concluded WITH unresolved issues    → do not enable
+          #   unknown → absent, timed out, or unreadable           → do not enable
           #
           # `unknown` deliberately does NOT fail the job. A PR that needs a
           # human to press merge is a normal outcome, not a broken pipeline;
           # failing here would redden every such PR and train people to ignore
-          # it. It is reported loudly in the step summary instead, which is the
-          # thing that makes "nothing was enabled" legible.
+          # it. It is reported loudly in the step summary instead.
           set -euo pipefail
-
-          if [ -z "$CHECK_NAME" ]; then
-            echo "verdict=clean" >> "$GITHUB_OUTPUT"
-            echo "detail=review gate disabled by caller (maintainer-review-check is empty)" >> "$GITHUB_OUTPUT"
-            echo "::warning::Maintainer review gate is DISABLED on $REPO — auto-merge will land this PR without any review having concluded."
-            exit 0
-          fi
-
-          # classify_review_runs: begin
-          # Reads "<status>\t<conclusion>\t<name>" lines (one per matching check
-          # run) on stdin and prints exactly one of:
-          #   wait               nothing decisive yet: no runs, only
-          #                      skipped/neutral/stale runs, or any run still
-          #                      in flight
-          #   failed<TAB><line>  every decisive run completed and one failed
-          #   clean<TAB><line>   every decisive run completed and none failed
-          #
-          # SKIPPED / NEUTRAL / STALE ARE NOT A VERDICT. A run that concluded
-          # `skipped` (e.g. the draft-phase run before `ready_for_review`),
-          # `neutral` or `stale` says nothing about the code. Counting it as
-          # "completed and not failed" read as clean: rarebit-sre#330 merged at
-          # 08:10:32 on a skipped draft-phase run while the real review ran
-          # 08:10:33–08:13:54.
-          #
-          # FIELD-SPLIT WITH awk -F'\t', NOT `grep -E '\t'`: GNU grep -E does not
-          # expand `\t` (it matches a literal `t`), BSD grep does — which once
-          # made the failure branch unmatchable on Linux runners and turned this
-          # gate into a rubber stamp.
-          classify_review_runs() {
-            awk -F'\t' '
-              NF == 0 { next }
-              $1 == "completed" && ($2 == "skipped" || $2 == "neutral" || $2 == "stale") { next }
-              { n++; if (n == 1) first = $0 }
-              $1 != "completed" { running = 1 }
-              $1 == "completed" && ($2 == "failure" || $2 == "timed_out" || $2 == "cancelled" || $2 == "action_required") && bad == "" { bad = $0 }
-              END {
-                if (n == 0 || running) { print "wait"; exit }
-                if (bad != "") { print "failed\t" bad; exit }
-                print "clean\t" first
-              }'
-          }
-          # classify_review_runs: end
 
           deadline=$(( $(date +%s) + TIMEOUT_S ))
           verdict=unknown
-          detail="no check named '$CHECK_NAME' appeared for $HEAD_SHA"
+          detail="review not found for $HEAD_SHA after ${TIMEOUT_S}s"
 
-          while :; do
-            # MATCH ON THE JOB NAME, OR ON A "<caller job> / <job>" SUFFIX.
+          if [ -n "$CHECK_NAME" ]; then
+            # Named check-run path: wait for a check-run matching CHECK_NAME.
+            # Used by rarebit-static-v3 (review/clear) and any other repo with
+            # a binding required check that is not the Codex comment gate.
+            # Matched EXACTLY or as a "<caller job name> / <this>" suffix.
             #
-            # A check-run produced by a `workflow_call` job is named
-            # "<caller job name> / <called job name>", NOT the called job's name
-            # alone — `review / Claude Code Review` on sidekick-labs repos,
-            # `Claude Code Review / Claude Code Review` on this one. An exact
-            # match against a bare `Claude Code Review` therefore matches
-            # NOTHING, every maintainer PR burns the full timeout and lands on
-            # `unknown`, and the gate silently stops gating.
+            # classify_review_runs: begin
+            # Reads "<status>\t<conclusion>\t<name>" lines (one per matching
+            # check run) and prints one of:
+            #   wait               nothing decisive yet
+            #   failed<TAB><line>  every decisive run completed and one failed
+            #   clean<TAB><line>   every decisive run completed and none failed
             #
-            # That is this PR's own failure mode reproduced one layer down, so
-            # it is matched structurally rather than by asking every caller to
-            # spell the composite name correctly: exact, or anything ending in
-            # "/ <name>". Callers may still pass the full composite string to
-            # pin it precisely.
-            #
-            # `|| true` on the read, then an explicit empty-check: an API blip
-            # must land in `unknown`, never in a silent pass.
-            runs=$(gh api "/repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
-                     --jq '.check_runs[]
-                           | select(.name == env.CHECK_NAME
-                                    or (.name | endswith("/ " + env.CHECK_NAME)))
-                           | "\(.status)\t\(.conclusion // "-")\t\(.name)"' 2>/dev/null || true)
+            # SKIPPED / NEUTRAL / STALE ARE NOT A VERDICT (rarebit-sre#330).
+            # FIELD-SPLIT WITH awk -F'\t', NOT `grep -E '\t'` (GNU vs BSD bug).
+            classify_review_runs() {
+              awk -F'\t' '
+                NF == 0 { next }
+                $1 == "completed" && ($2 == "skipped" || $2 == "neutral" || $2 == "stale") { next }
+                { n++; if (n == 1) first = $0 }
+                $1 != "completed" { running = 1 }
+                $1 == "completed" && ($2 == "failure" || $2 == "timed_out" || $2 == "cancelled" || $2 == "action_required") && bad == "" { bad = $0 }
+                END {
+                  if (n == 0 || running) { print "wait"; exit }
+                  if (bad != "") { print "failed\t" bad; exit }
+                  print "clean\t" first
+                }'
+            }
+            # classify_review_runs: end
 
-            # Classification lives in classify_review_runs (above), pinned by
-            # tests/maintainer-review-gate.test.sh.
-            result=$(printf '%s\n' "$runs" | classify_review_runs)
-            class=${result%%$'\t'*}
-            if [ "$class" = clean ] || [ "$class" = failed ]; then
-              verdict=$class
-              driving=${result#*$'\t'}
-              detail="$(printf '%s' "$driving" | cut -f3) concluded $(printf '%s' "$driving" | cut -f2)"
-              break
-            fi
+            detail="no check named '$CHECK_NAME' appeared for $HEAD_SHA"
 
-            if [ "$(date +%s)" -ge "$deadline" ]; then
-              if printf '%s\n' "$runs" | awk -F'\t' 'NF && $1 != "completed" { f = 1 } END { exit !f }'; then
-                detail="'$CHECK_NAME' was still running after ${TIMEOUT_S}s"
-              elif [ -n "$runs" ]; then
-                detail="only skipped/neutral/stale '$CHECK_NAME' runs for $HEAD_SHA after ${TIMEOUT_S}s — no review concluded"
+            while :; do
+              runs=$(gh api "/repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
+                       --jq '.check_runs[]
+                             | select(.name == env.CHECK_NAME
+                                      or (.name | endswith("/ " + env.CHECK_NAME)))
+                             | "\(.status)\t\(.conclusion // "-")\t\(.name)"' 2>/dev/null || true)
+
+              # Classification is pinned by tests/maintainer-review-gate.test.sh.
+              result=$(printf '%s\n' "$runs" | classify_review_runs)
+              class=${result%%$'\t'*}
+              if [ "$class" = clean ] || [ "$class" = failed ]; then
+                verdict=$class
+                driving=${result#*$'\t'}
+                detail="$(printf '%s' "$driving" | cut -f3) concluded $(printf '%s' "$driving" | cut -f2)"
+                break
               fi
-              break
-            fi
-            sleep 15
-          done
+
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                if printf '%s\n' "$runs" | awk -F'\t' 'NF && $1 != "completed" { f = 1 } END { exit !f }'; then
+                  detail="'$CHECK_NAME' was still running after ${TIMEOUT_S}s"
+                elif [ -n "$runs" ]; then
+                  detail="only skipped/neutral/stale '$CHECK_NAME' runs for $HEAD_SHA after ${TIMEOUT_S}s — no review concluded"
+                fi
+                break
+              fi
+              sleep 15
+            done
+          else
+            # Codex path (default): poll chatgpt-codex-connector[bot]'s
+            # codex-review-state PR comment for code_review.status == "completed"
+            # on the exact head SHA. The comment body contains a machine-readable
+            # HTML comment:
+            #   <!-- codex-review-state:v1 {JSON} -->
+            # where JSON includes code_review.commit_sha, .status, and
+            # .has_unresolved_findings.
+            #
+            # This is the safe replacement for the Claude check-run gate: an
+            # absent or timed-out Codex comment lands on `unknown` and holds
+            # the PR for a human, matching the old gate's fail-closed shape.
+            detail="codex-review-state comment not found for $HEAD_SHA after ${TIMEOUT_S}s"
+
+            while :; do
+              # Fetch all PR comments from the Codex bot (one per push).
+              # `tail -1` picks the most recent codex-review-state line when
+              # multiple pushes have been reviewed.
+              comment_line=$(gh api "/repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" \
+                --jq '.[] | select(.user.login == "chatgpt-codex-connector[bot]") | .body' 2>/dev/null \
+                | grep 'codex-review-state:v1' | tail -1 || true)
+
+              if [ -n "$comment_line" ]; then
+                # Extract the JSON from: <!-- codex-review-state:v1 {...} -->
+                state_json=$(printf '%s' "$comment_line" \
+                  | sed 's/.*codex-review-state:v1 //' | sed 's/ -->.*$//')
+
+                commit_sha=$(printf '%s' "$state_json" | jq -r '.code_review.commit_sha // ""' 2>/dev/null || true)
+                status=$(printf '%s' "$state_json" | jq -r '.code_review.status // ""' 2>/dev/null || true)
+
+                if [ "$commit_sha" = "$HEAD_SHA" ] && [ "$status" = "completed" ]; then
+                  has_unresolved=$(printf '%s' "$state_json" | jq -r '.code_review.has_unresolved_findings // true' 2>/dev/null || echo true)
+                  if [ "$has_unresolved" = "false" ]; then
+                    verdict=clean
+                    detail="Codex review completed with no unresolved findings on $HEAD_SHA"
+                  else
+                    verdict=failed
+                    detail="Codex review completed with unresolved findings on $HEAD_SHA"
+                  fi
+                  break
+                elif [ -n "$commit_sha" ] && [ "$commit_sha" != "$HEAD_SHA" ]; then
+                  detail="codex-review-state found for $commit_sha, not yet for $HEAD_SHA"
+                fi
+              fi
+
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                break
+              fi
+              sleep 15
+            done
+          fi
 
           echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
           echo "detail=$detail" >> "$GITHUB_OUTPUT"
@@ -663,7 +675,11 @@ jobs:
                 echo ""
                 echo "Auto-merge was **not** enabled. This is deliberate: an absent or unfinished review is not evidence of a clean one."
                 echo ""
-                echo "If this repo genuinely runs no code review, the caller should pass \`maintainer-review-check: ''\` explicitly rather than letting every maintainer PR land here."
+                if [ -n "$CHECK_NAME" ]; then
+                  echo "Waiting for check-run named \`$CHECK_NAME\`. If this repo genuinely has no review, set \`maintainer-review-check: ''\` in the caller."
+                else
+                  echo "Waiting for Codex's \`codex-review-state\` comment. If Codex is not installed on this repo, check the chatgpt-codex-connector app settings."
+                fi
               } >> "$GITHUB_STEP_SUMMARY" ;;
           esac
 

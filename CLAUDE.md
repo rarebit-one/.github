@@ -23,7 +23,6 @@ Then work inside `.worktrees/<name>/` for the rest of the session.
 - `.github/workflows/reusable-track-do-deployment.yml` — DigitalOcean deployment **tracker** (observes a `deploy_on_push` rollout, polls the DO API, probes the public URL, comments on the merged PR). Not a deployer.
 - `.github/workflows/reusable-deploy-docr-staging.yml` — the build-once/promote staging **deployer** (`rarebit-sre#189`): builds the caller's image on a GitHub-hosted **x64** runner, pushes it to DOCR under an immutable per-SHA tag, and patches only the live app spec's image reference. Ships **inert** behind `docr_live`, and degrades to a loud green no-op when the token lacks registry write. `promote_only: true` is the rollback path. The build runner is hardcoded because DO runs amd64 and the mac-mini-1 runners are arm64.
 - `.github/workflows/claude-agent.yml` — issue-triggered Claude PR agent
-- `.github/workflows/claude-code-review.yml` — PR-triggered Claude review bot
 - `.github/workflows/codeql-actions.yml` — CodeQL scanning for the Actions language
 - `.github/workflows/pin-check.yml` — reusable PR gate: fails on un-SHA-pinned third-party actions (zizmor + pinact)
 - `.github/workflows/pin-sweep.yml` — scheduled cross-repo self-healer: re-pins drift via `pinact run` and opens auto-merge PRs
@@ -44,7 +43,7 @@ Consumers pin to a **moving major tag** (or a specific SHA) rather than `@main`,
 | Ref | Workflows |
 |-----|-----------|
 | `@v2` | **every versioned reusable**: `reusable-gem-ci`, `reusable-gem-release`, `reusable-weekly-maintenance`, `reusable-maven-central-release`, `sentry-release` |
-| `@main` | `claude-agent`, `claude-code-review`, `deploy-production`, `dependabot-auto-merge`, `pin-check` and the other low-contract dispatchers — changes go live immediately on merge, by design |
+| `@main` | `claude-agent`, `deploy-production`, `dependabot-auto-merge`, `pin-check` and the other low-contract dispatchers — changes go live immediately on merge, by design |
 
 **`v2` is the only live tag.** This table previously said `reusable-gem-ci` and
 `sentry-release` were consumed at `@v1`. They are not, and had not been for
@@ -74,4 +73,4 @@ could take all 8 gems red at once.
 
 ## Claude model
 
-The Claude-invoking workflows (`claude-agent`, `claude-code-review`, `reusable-weekly-maintenance`) pin the model via a single per-file `env: CLAUDE_MODEL: "${{ vars.CLAUDE_MODEL || 'claude-sonnet-5-5' }}"`, referenced as `--model ${{ env.CLAUDE_MODEL }}`. **To bump the model org-wide**, set the `CLAUDE_MODEL` org variable (`gh variable set CLAUDE_MODEL --org rarebit-one --body <id> --visibility all`) — no PR or re-tag; `vars` resolves in the caller's context so it reaches every consumer. The literal is a safe fallback against an unset variable. See `docs/reusable-workflows.md` → "Claude model selection". (The same convention is mirrored in `fundbright/.github`.)
+The Claude-invoking workflows (`claude-agent`, `reusable-weekly-maintenance`) pin the model via a single per-file `env: CLAUDE_MODEL: "${{ vars.CLAUDE_MODEL || 'claude-sonnet-5-5' }}"`, referenced as `--model ${{ env.CLAUDE_MODEL }}`. **To bump the model org-wide**, set the `CLAUDE_MODEL` org variable (`gh variable set CLAUDE_MODEL --org rarebit-one --body <id> --visibility all`) — no PR or re-tag; `vars` resolves in the caller's context so it reaches every consumer. The literal is a safe fallback against an unset variable. See `docs/reusable-workflows.md` → "Claude model selection". (The same convention is mirrored in `fundbright/.github`.)
