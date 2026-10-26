@@ -209,8 +209,9 @@ jobs:
           set -uo pipefail
           CONCLUSION=""
           for i in 1 2 3; do
-            CONCLUSION=$(gh run list --workflow="$CI_WORKFLOW" --branch=main --json headSha,conclusion \
-              --jq ".[] | select(.headSha == \"$SHA\") | .conclusion" | head -1)
+            # --commit filters server-side, so an older ref outside the latest 20 runs still resolves.
+            CONCLUSION=$(gh run list --workflow="$CI_WORKFLOW" --branch=main --commit "$SHA" --json conclusion \
+              --jq '.[0].conclusion // ""')
             [ -n "$CONCLUSION" ] && break
             echo "No $CI_WORKFLOW run for $SHA yet, retrying in 10s (attempt $i/3)"
             sleep 10
@@ -440,13 +441,18 @@ jobs:
         # promoting alone deploys nothing). Not continue-on-error: a deploy that
         # doesn't go live must turn the run red. On a dry run it only checks that the
         # token can see the app.
+        # Also runs when production is already at the target (a re-run after a failed
+        # deploy): it then deploys unless the live deployment is already that commit,
+        # so a failed rollout can be resumed without another commit.
         id: do_deploy
-        if: inputs.do_production_app_id != '' && steps.check.outputs.skip != 'true' && (inputs.dry_run || steps.promote.outcome == 'success')
+        if: inputs.do_production_app_id != '' && (inputs.dry_run || steps.promote.outcome == 'success' || steps.check.outputs.skip == 'true')
         env:
           DO_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
           APP_ID: ${{ inputs.do_production_app_id }}
           HEALTH_URL: ${{ inputs.health_url }}
           DRY_RUN: ${{ inputs.dry_run }}
+          SHA: ${{ steps.main.outputs.sha }}
+          SKIP: ${{ steps.check.outputs.skip }}
         run: |
           set -uo pipefail
           API="https://api.digitalocean.com/v2"
@@ -466,33 +472,43 @@ jobs:
             echo "phase=DRY_RUN" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          HTTP=$(curl -sS -o dep.json -w '%{http_code}' -X POST -H "$AUTH" -H "Content-Type: application/json" \
-            -d '{"force_build":false}' "${API}/apps/${APP_ID}/deployments")
-          if [ "$HTTP" != "200" ] && [ "$HTTP" != "201" ]; then
-            echo "::error::Creating the deployment failed (HTTP ${HTTP}). $(tr -d '\n' < dep.json | head -c 300)"
-            exit 1
-          fi
-          DEP=$(jq -r '.deployment.id' dep.json)
-          echo "Deployment ${DEP} for ${NAME}; watching"
-          DEADLINE=$(( $(date +%s) + 1500 ))
-          PHASE=UNKNOWN
-          while :; do
-            curl -sS -o get.json -H "$AUTH" "${API}/apps/${APP_ID}/deployments/${DEP}" || true
-            PHASE=$(jq -r '.deployment.phase // "UNKNOWN"' get.json 2>/dev/null || echo UNKNOWN)
-            echo "  phase: ${PHASE}"
-            case "$PHASE" in ACTIVE|ERROR|CANCELED|SUPERSEDED) break ;; esac
-            if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-              echo "phase=$PHASE" >> "$GITHUB_OUTPUT"
-              echo "::error::Deployment ${DEP} did not finish within 25 minutes (last phase ${PHASE})"
+          # Every component's source commit in the active deployment; empty if DO
+          # doesn't report one (image-based components), in which case we deploy.
+          LIVE=$(jq -r '[.app.active_deployment | (.services, .workers, .jobs, .static_sites)[]? | .source_commit_hash // empty] | unique | join(" ")' app.json)
+          if [ "$SKIP" = "true" ] && [ "$LIVE" = "$SHA" ]; then
+            echo "::notice::${NAME} is already live at ${SHA}; checking health only"
+            PHASE=ACTIVE
+          else
+            [ "$SKIP" = "true" ] && echo "::notice::production is at ${SHA} but ${NAME} is live at '${LIVE:-unknown}'; resuming the deploy"
+            HTTP=$(curl -sS -o dep.json -w '%{http_code}' -X POST -H "$AUTH" -H "Content-Type: application/json" \
+              -d '{"force_build":false}' "${API}/apps/${APP_ID}/deployments")
+            if [ "$HTTP" != "200" ] && [ "$HTTP" != "201" ]; then
+              echo "::error::Creating the deployment failed (HTTP ${HTTP}). $(tr -d '\n' < dep.json | head -c 300)"
               exit 1
             fi
-            sleep 20
-          done
-          echo "phase=$PHASE" >> "$GITHUB_OUTPUT"
-          if [ "$PHASE" != "ACTIVE" ]; then
-            echo "::error::Deployment ${DEP} ended ${PHASE}; production is promoted but the live build is the previous one"
-            exit 1
+            DEP=$(jq -r '.deployment.id' dep.json)
+            echo "Deployment ${DEP} for ${NAME}; watching"
+            DEADLINE=$(( $(date +%s) + 1500 ))
+            PHASE=UNKNOWN
+            while :; do
+              curl -sS -o get.json -H "$AUTH" "${API}/apps/${APP_ID}/deployments/${DEP}" || true
+              PHASE=$(jq -r '.deployment.phase // "UNKNOWN"' get.json 2>/dev/null || echo UNKNOWN)
+              echo "  phase: ${PHASE}"
+              case "$PHASE" in ACTIVE|ERROR|CANCELED|SUPERSEDED) break ;; esac
+              if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+                echo "phase=$PHASE" >> "$GITHUB_OUTPUT"
+                echo "::error::Deployment ${DEP} did not finish within 25 minutes (last phase ${PHASE})"
+                exit 1
+              fi
+              sleep 20
+            done
+            if [ "$PHASE" != "ACTIVE" ]; then
+              echo "phase=$PHASE" >> "$GITHUB_OUTPUT"
+              echo "::error::Deployment ${DEP} ended ${PHASE}; production is promoted but the live build is the previous one. Re-run this workflow to retry the deploy."
+              exit 1
+            fi
           fi
+          echo "phase=$PHASE" >> "$GITHUB_OUTPUT"
           [ -z "$HEALTH_URL" ] && exit 0
           STATUS=unreachable
           for i in 1 2 3 4 5 6; do
@@ -508,7 +524,9 @@ jobs:
           esac
 
       - name: Record the Sentry production deploy
-        if: steps.promote.outcome == 'success'
+        # always(): a failed DO health gate must not suppress the deploy record, since
+        # that release is live and attribution matters most then.
+        if: always() && steps.promote.outcome == 'success'
         continue-on-error: true
         env:
           SHA: ${{ steps.main.outputs.sha }}
@@ -630,7 +648,11 @@ jobs:
           DEPLOY: ${{ steps.do_deploy.outcome }}
           PHASE: ${{ steps.do_deploy.outputs.phase }}
         run: |
-          if [ "$SKIP" = "true" ]; then
+          if [ "$SKIP" = "true" ] && [ "$DEPLOY" = "failure" ]; then
+            echo "::error::production is already at $SHA, but resuming the DO deploy failed (phase ${PHASE:-n/a})"
+          elif [ "$SKIP" = "true" ] && [ "$DEPLOY" = "success" ]; then
+            echo "::notice::production is already at $SHA; the DO app is live and healthy at it"
+          elif [ "$SKIP" = "true" ]; then
             echo "::notice::No-op: production is already at $SHA"
           elif [ "$DRY_RUN" = "true" ]; then
             echo "::notice::Dry run complete: would promote $TAG ($SHA); DO check: ${DEPLOY:-not configured}"
