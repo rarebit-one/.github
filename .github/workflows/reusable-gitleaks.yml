@@ -121,18 +121,50 @@ jobs:
           tar -xzf "${RUNNER_TEMP}/gitleaks.tar.gz" -C "${RUNNER_TEMP}" gitleaks
           echo "${RUNNER_TEMP}" >> "${GITHUB_PATH}"
 
+      - name: Resolve scan range
+        # Computes BASE_SHA and HEAD_SHA for the gitleaks log range.
+        # pull_request events: use the PR base/head SHAs directly.
+        # push events:        use github.event.before (or HEAD~1 when before is
+        #                     all-zeros, which happens on first push of a branch).
+        # Any other event fails fast.
+        id: resolve-range
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_SHA: ${{ github.sha }}
+        run: |
+          case "$EVENT_NAME" in
+            pull_request)
+              base="$PR_BASE"
+              head="$PR_HEAD"
+              ;;
+            push)
+              head="$PUSH_SHA"
+              if echo "$PUSH_BEFORE" | grep -qE '^0+$'; then
+                base="$(git rev-parse HEAD~1 2>/dev/null || echo "$head")"
+              else
+                base="$PUSH_BEFORE"
+              fi
+              ;;
+            *)
+              echo "::error::Unsupported event '${EVENT_NAME}'. This reusable supports pull_request and push." >&2
+              exit 1
+              ;;
+          esac
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "Resolved scan range: ${base:0:8}..${head:0:8} ($EVENT_NAME)"
+
       - name: Resolve gitleaks config and ignore-path from base commit
-        # Loads .gitleaks.toml and .gitleaksignore from the PR's BASE commit
-        # so the PR branch cannot introduce bypass rules in the same diff.
+        # Loads .gitleaks.toml and .gitleaksignore from BASE so the diff under
+        # review cannot introduce allowlist bypass rules in the same change.
         # When absent on the base, a minimal stub (default rules, no allowlist)
         # and an empty ignore-path file are used respectively.
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ steps.resolve-range.outputs.base }}
         run: |
-          if [ -z "${BASE_SHA}" ]; then
-            echo "::error::BASE_SHA is empty — this reusable requires a pull_request event." >&2
-            exit 1
-          fi
 
           # Config: load from base or write a stub that extends built-in rules.
           CONFIG_PATH="${RUNNER_TEMP}/.gitleaks.toml"
@@ -162,24 +194,19 @@ jobs:
           echo "GITLEAKS_CONFIG_PATH=${CONFIG_PATH}" >> "${GITHUB_ENV}"
           echo "GITLEAKS_IGNORE_PATH=${IGNORE_PATH}" >> "${GITHUB_ENV}"
 
-      - name: Scan PR diff for secrets
-        # Scans only the commits introduced by this PR (BASE..HEAD) so that
-        # pre-existing secrets in the repository's history do not block
-        # unrelated PRs. This workflow is designed as a pull_request gate;
-        # if HEAD_SHA is absent the step fails explicitly.
+      - name: Scan diff for secrets
+        # Scans only the commits in BASE..HEAD so that pre-existing secrets in
+        # history do not block unrelated PRs. BASE and HEAD are resolved by the
+        # "Resolve scan range" step above; if it succeeded, both are non-empty.
         #
         # Note: `gitleaks git` takes the repository as a positional argument,
         # not via --source (which is a `detect` flag). Omitting it defaults to
         # the current directory.
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ steps.resolve-range.outputs.base }}
+          HEAD_SHA: ${{ steps.resolve-range.outputs.head }}
         run: |
-          if [ -z "${HEAD_SHA}" ]; then
-            echo "::error::HEAD_SHA is empty — this reusable requires a pull_request event." >&2
-            exit 1
-          fi
-          echo "Scanning ${BASE_SHA:0:8}..${HEAD_SHA:0:8} (PR diff only)"
+          echo "Scanning ${BASE_SHA:0:8}..${HEAD_SHA:0:8}"
           # Remove .gitleaksignore from the working tree before scanning.
           # gitleaks auto-loads <source>/.gitleaksignore regardless of
           # --gitleaks-ignore-path. `rm -f` removes a symlink without
