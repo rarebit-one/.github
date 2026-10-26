@@ -408,12 +408,17 @@ jobs:
           # days having landed nothing — fail loudly instead. MERGED counts as
           # success: when every requirement is already green GitHub merges
           # outright and leaves no pending autoMergeRequest, so a null there
-          # means "already landed", not "enable failed". `set -e` above makes a
-          # flaky `gh pr view` abort rather than read as queued.
-          verdict=$(gh pr view "$PR_URL" --json autoMergeRequest,state \
-            --jq 'if .state == "MERGED" or .autoMergeRequest != null then "ok" else "not-queued" end')
+          # means "already landed", not "enable failed". On a merge-queue repo
+          # (heyarr-core) a PR whose checks are already green goes straight into
+          # the queue, which also leaves autoMergeRequest null: isInMergeQueue
+          # counts as queued. `gh pr view` has no merge-queue field, hence the
+          # GraphQL read. `set -e` above makes a flaky read abort rather than
+          # read as queued.
+          verdict=$(gh api graphql -f url="$PR_URL" \
+            -f query='query($url: URI!) { resource(url: $url) { ... on PullRequest { state isInMergeQueue autoMergeRequest { enabledAt } } } }' \
+            --jq '.data.resource | if .state == "MERGED" or .autoMergeRequest != null or .isInMergeQueue then "ok" else "not-queued" end')
           if [ "$verdict" != "ok" ]; then
-            echo "::error::auto-merge was NOT queued on $PR_URL (autoMergeRequest null and state is not MERGED)"
+            echo "::error::auto-merge was NOT queued on $PR_URL (autoMergeRequest null, not in the merge queue, and state is not MERGED)"
             exit 1
           fi
           echo "auto-merge queued (or already merged) on $PR_URL" >> "$GITHUB_STEP_SUMMARY"
@@ -440,10 +445,11 @@ jobs:
           # exact silent-success bug this workflow exists to close: a `|| echo`
           # swallows the failure, the step's outcome is still `success` (not
           # `skipped`), so the reporter below never flags it either.
-          verdict=$(gh pr view "$PR_URL" --json autoMergeRequest,state \
-            --jq 'if .state == "MERGED" or .autoMergeRequest != null then "ok" else "not-queued" end')
+          verdict=$(gh api graphql -f url="$PR_URL" \
+            -f query='query($url: URI!) { resource(url: $url) { ... on PullRequest { state isInMergeQueue autoMergeRequest { enabledAt } } } }' \
+            --jq '.data.resource | if .state == "MERGED" or .autoMergeRequest != null or .isInMergeQueue then "ok" else "not-queued" end')
           if [ "$verdict" != "ok" ]; then
-            echo "::error::auto-merge was NOT queued on $PR_URL (autoMergeRequest null and state is not MERGED)"
+            echo "::error::auto-merge was NOT queued on $PR_URL (autoMergeRequest null, not in the merge queue, and state is not MERGED)"
             exit 1
           fi
           echo "auto-merge queued (or already merged) on $PR_URL" >> "$GITHUB_STEP_SUMMARY"
@@ -713,10 +719,11 @@ jobs:
 
           # Same readback as the other two paths — `gh pr merge --auto` can
           # report success while queueing nothing.
-          verdict=$(gh pr view "$PR_URL" --json autoMergeRequest,state \
-            --jq 'if .state == "MERGED" or .autoMergeRequest != null then "ok" else "not-queued" end')
+          verdict=$(gh api graphql -f url="$PR_URL" \
+            -f query='query($url: URI!) { resource(url: $url) { ... on PullRequest { state isInMergeQueue autoMergeRequest { enabledAt } } } }' \
+            --jq '.data.resource | if .state == "MERGED" or .autoMergeRequest != null or .isInMergeQueue then "ok" else "not-queued" end')
           if [ "$verdict" != "ok" ]; then
-            echo "::error::auto-merge was NOT queued on $PR_URL (autoMergeRequest null and state is not MERGED)"
+            echo "::error::auto-merge was NOT queued on $PR_URL (autoMergeRequest null, not in the merge queue, and state is not MERGED)"
             exit 1
           fi
           echo "auto-merge queued (or already merged) on $PR_URL" >> "$GITHUB_STEP_SUMMARY"
