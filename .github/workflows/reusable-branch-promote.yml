@@ -88,6 +88,9 @@ on:
       sha:
         description: "The promoted SHA."
         value: ${{ jobs.promote.outputs.sha }}
+      skipped:
+        description: "\"true\" when production was already at the target SHA and nothing was promoted."
+        value: ${{ jobs.promote.outputs.skipped }}
       slack_thread_ts:
         description: "ts of the Slack release thread root (empty if none was posted)."
         value: ${{ jobs.promote.outputs.slack_thread_ts }}
@@ -107,6 +110,7 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       sha: ${{ steps.main.outputs.sha }}
+      skipped: ${{ steps.check.outputs.skip }}
       slack_thread_ts: ${{ steps.slack_root.outputs.thread_ts }}
     env:
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
