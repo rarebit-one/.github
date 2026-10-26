@@ -24,6 +24,12 @@ name: Branch-promote to production
 #   slack_thread          post a "release started" root and an outcome reply to
 #                         vars.SLACK_RELEASE_CHANNEL_ID; output slack_thread_ts so the
 #                         caller can thread its own follow-ups (e.g. a smoke verdict).
+#   regions               promote several production branches together (one per
+#                         region, e.g. production-sg + production-my): one tag and
+#                         Release, a Sentry deploy per region, and an HTTP health probe
+#                         per region that fails the run if any region isn't serving.
+#                         Empty means one region: branch `production`, Sentry
+#                         environment `production`, no probe.
 #
 # Callers grant `contents: write` and pass `secrets: inherit` (SENTRY_AUTH_TOKEN,
 # and DIGITALOCEAN_ACCESS_TOKEN / SLACK_BOT_TOKEN / RELEASE_BOT_PRIVATE_KEY when the
@@ -83,6 +89,16 @@ on:
         required: false
         type: boolean
         default: false
+      regions:
+        description: >-
+          JSON list of production branches to promote together, e.g.
+          '[{"branch":"production-sg","sentry_environment":"production-sg","health_url":"https://www.example.sg/health/alive"}]'.
+          `sentry_environment` defaults to the branch name; `health_url` (optional) must
+          answer 2xx after the promote. Empty: one region, branch `production`, Sentry
+          environment `production`, no probe.
+        required: false
+        type: string
+        default: ""
     outputs:
       tag:
         description: "The release tag cut (empty on a no-op or dry run)."
@@ -96,6 +112,12 @@ on:
       slack_thread_ts:
         description: "ts of the Slack release thread root (empty if none was posted)."
         value: ${{ jobs.promote.outputs.slack_thread_ts }}
+      promote_branches:
+        description: "Space-separated branches that were behind and got promoted (empty on a no-op)."
+        value: ${{ jobs.promote.outputs.promote_branches }}
+      unhealthy_regions:
+        description: "Space-separated branches whose health_url did not answer 2xx (empty when all healthy or not probed)."
+        value: ${{ jobs.promote.outputs.unhealthy_regions }}
 
 # Never cancel an in-progress promotion.
 concurrency:
@@ -114,6 +136,8 @@ jobs:
       sha: ${{ steps.main.outputs.sha }}
       skipped: ${{ steps.check.outputs.skip }}
       slack_thread_ts: ${{ steps.slack_root.outputs.thread_ts }}
+      promote_branches: ${{ steps.check.outputs.promote_branches }}
+      unhealthy_regions: ${{ steps.region_health.outputs.unhealthy }}
     env:
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
       SENTRY_ORG: ${{ inputs.sentry_org }}
@@ -193,29 +217,64 @@ jobs:
           fi
           echo "$CI_WORKFLOW passed for $SHA"
 
+      - name: Resolve regions
+        # Normalise `regions` into $RUNNER_TEMP/regions.json, one object per branch with
+        # sentry_environment and health_url filled in, so later steps share one view.
+        env:
+          REGIONS: ${{ inputs.regions }}
+        run: |
+          set -euo pipefail
+          if [ -z "${REGIONS// /}" ]; then
+            REGIONS='[{"branch":"production","sentry_environment":"production"}]'
+          fi
+          if ! jq -e 'type == "array" and length > 0 and all(.[]; (.branch | type) == "string" and (.branch | length) > 0)' <<<"$REGIONS" >/dev/null; then
+            echo "::error::regions must be a non-empty JSON array of objects with a branch"
+            exit 1
+          fi
+          jq -c '[.[] | {branch, sentry_environment: (.sentry_environment // .branch), health_url: (.health_url // "")}]' \
+            <<<"$REGIONS" > "$RUNNER_TEMP/regions.json"
+          echo "Regions: $(jq -r '[.[].branch] | join(", ")' "$RUNNER_TEMP/regions.json")"
+
       - name: Check production branch state
         id: check
         env:
           SHA: ${{ steps.main.outputs.sha }}
         run: |
           set -euo pipefail
-          if ! git rev-parse --verify origin/production >/dev/null 2>&1; then
-            echo "::error::The production branch does not exist; create it first"
-            exit 1
-          fi
-          PROD_SHA=$(git rev-parse origin/production)
-          echo "prod_sha=$PROD_SHA" >> "$GITHUB_OUTPUT"
-          if [ "$SHA" = "$PROD_SHA" ]; then
+          PROMOTE="" BASE=""
+          for BRANCH in $(jq -r '.[].branch' "$RUNNER_TEMP/regions.json"); do
+            if ! git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
+              echo "::error::Branch $BRANCH does not exist; create it first"
+              exit 1
+            fi
+            BRANCH_SHA=$(git rev-parse "origin/$BRANCH")
+            if [ "$SHA" = "$BRANCH_SHA" ]; then
+              echo "::notice::$BRANCH is already at $SHA"
+              continue
+            fi
+            if ! git merge-base --is-ancestor "origin/$BRANCH" "$SHA"; then
+              echo "::error::$BRANCH has diverged from main; resolve it by hand"
+              exit 1
+            fi
+            PROMOTE="$PROMOTE $BRANCH"
+            # Notes and counts start from the furthest-behind branch.
+            if [ -z "$BASE" ] || git merge-base --is-ancestor "$BRANCH_SHA" "$BASE"; then
+              BASE="$BRANCH_SHA"
+            fi
+          done
+          PROMOTE="${PROMOTE# }"
+          echo "promote_branches=$PROMOTE" >> "$GITHUB_OUTPUT"
+          if [ -z "$PROMOTE" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::production is already at $SHA; nothing to promote"
+            echo "::notice::Every production branch is already at $SHA; nothing to promote"
             exit 0
           fi
-          if ! git merge-base --is-ancestor origin/production "$SHA"; then
-            echo "::error::production has diverged from main; resolve it by hand"
-            exit 1
-          fi
-          echo "commit_count=$(git rev-list "origin/production..$SHA" --count)" >> "$GITHUB_OUTPUT"
-          echo "skip=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "prod_sha=$BASE"
+            echo "commit_count=$(git rev-list "$BASE..$SHA" --count)"
+            echo "skip=false"
+          } >> "$GITHUB_OUTPUT"
+          echo "Promoting $PROMOTE"
 
       - name: Preflight - verify write access to production
         # A dry-run push, so a caller missing `contents: write` (or a bot token without
@@ -224,12 +283,15 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         env:
           SHA: ${{ steps.main.outputs.sha }}
+          BRANCHES: ${{ steps.check.outputs.promote_branches }}
         run: |
-          if ! git push --dry-run origin "${SHA}:refs/heads/production" 2>push.err; then
-            echo "::error::Cannot push to production. The caller must grant 'permissions: contents: write' (or the release bot needs access). $(tr '\n' ' ' < push.err)"
-            exit 1
-          fi
-          echo "Write access to production confirmed"
+          for BRANCH in $BRANCHES; do
+            if ! git push --dry-run origin "${SHA}:refs/heads/${BRANCH}" 2>push.err; then
+              echo "::error::Cannot push to ${BRANCH}. The caller must grant 'permissions: contents: write' (or the release bot needs access). $(tr '\n' ' ' < push.err)"
+              exit 1
+            fi
+            echo "Write access to ${BRANCH} confirmed"
+          done
 
       - name: Generate release tag
         id: tag
@@ -249,6 +311,8 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
           DRY_RUN: ${{ inputs.dry_run }}
           COUNT: ${{ steps.check.outputs.commit_count }}
+          BASE: ${{ steps.check.outputs.prod_sha }}
+          BRANCHES: ${{ steps.check.outputs.promote_branches }}
         run: |
           {
             echo "## Production promotion"
@@ -256,9 +320,10 @@ jobs:
             [ "$DRY_RUN" = "true" ] && { echo "> **Dry run**: nothing will be promoted"; echo; }
             echo "**Tag:** \`$TAG\`  "
             echo "**SHA:** \`$SHA\`  "
-            echo "**Commits:** $COUNT"
+            echo "**Commits:** $COUNT  "
+            echo "**Branches:** $BRANCHES"
             echo
-            git log "origin/production..$SHA" --format="- %h %s" --reverse
+            git log "$BASE..$SHA" --format="- %h %s" --reverse
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Post Slack release thread root
@@ -274,6 +339,8 @@ jobs:
           SHA: ${{ steps.main.outputs.sha }}
           TAG: ${{ steps.tag.outputs.tag }}
           COUNT: ${{ steps.check.outputs.commit_count }}
+          BASE: ${{ steps.check.outputs.prod_sha }}
+          BRANCHES: ${{ steps.check.outputs.promote_branches }}
         run: |
           set -uo pipefail
           if [ -z "${SLACK_BOT_TOKEN:-}" ] || [ -z "${CHANNEL:-}" ]; then
@@ -291,12 +358,13 @@ jobs:
                 shown=$((shown + 1))
               fi
             fi
-          done < <(git log "origin/production..$SHA" --format=%s --reverse)
+          done < <(git log "$BASE..$SHA" --format=%s --reverse)
           [ "$total" -gt "$shown" ] && PRS+="…and $((total - shown)) more"$'\n'
           TEXT=$(printf '%s\n' \
             "🚀 *Production release started*: \`${REPO}\`" \
             "*Tag:* <${SERVER_URL}/${REPO}/releases/tag/${TAG}|${TAG}>" \
-            "*Commit:* \`${SHA:0:9}\` (${COUNT} commit(s))")
+            "*Commit:* \`${SHA:0:9}\` (${COUNT} commit(s))" \
+            "*Branches:* ${BRANCHES}")
           [ -n "$PRS" ] && TEXT+=$'\n'"*PRs:*"$'\n'"${PRS%$'\n'}"
           RESP=$(jq -n --arg ch "$CHANNEL" --arg text "$TEXT" '{channel:$ch, text:$text, unfurl_links:false}' \
             | curl -sS -X POST https://slack.com/api/chat.postMessage \
@@ -312,15 +380,18 @@ jobs:
         if: steps.check.outputs.skip != 'true' && inputs.dry_run != true
         env:
           SHA: ${{ steps.main.outputs.sha }}
+          BRANCHES: ${{ steps.check.outputs.promote_branches }}
         run: |
           set -euo pipefail
-          git push origin "${SHA}:refs/heads/production"
-          git fetch -q origin production
-          if [ "$(git rev-parse origin/production)" != "$SHA" ]; then
-            echo "::error::production did not move to $SHA"
-            exit 1
-          fi
-          echo "production is at $SHA"
+          for BRANCH in $BRANCHES; do
+            git push origin "${SHA}:refs/heads/${BRANCH}"
+            git fetch -q origin "$BRANCH"
+            if [ "$(git rev-parse "origin/$BRANCH")" != "$SHA" ]; then
+              echo "::error::$BRANCH did not move to $SHA"
+              exit 1
+            fi
+            echo "$BRANCH is at $SHA"
+          done
 
       - name: Create release tag
         # Fail-soft: the promote already happened, and a tag hiccup must not skip the
@@ -346,11 +417,14 @@ jobs:
           SHA: ${{ steps.main.outputs.sha }}
           TAG: ${{ steps.tag.outputs.tag }}
           PREV_SHA: ${{ steps.check.outputs.prod_sha }}
+          BRANCHES: ${{ steps.check.outputs.promote_branches }}
+          REGIONS_SET: ${{ inputs.regions != '' }}
         run: |
           set -uo pipefail
           COUNT=$(git rev-list "${PREV_SHA}..${SHA}" --count)
           NOTES=$(git log "${PREV_SHA}..${SHA}" --format="- %h %s (%an)" --reverse | head -50)
           [ "$COUNT" -gt 50 ] && NOTES+=$'\n'"_($((COUNT - 50)) more commits not shown)_"
+          [ "$REGIONS_SET" = "true" ] && NOTES="**Branches:** ${BRANCHES}"$'\n\n'"${NOTES}"
           gh release create "$TAG" --title "$TAG" --notes "$NOTES" --target "$SHA" --latest
 
       - name: Deploy to DigitalOcean and watch it live
@@ -431,6 +505,7 @@ jobs:
         env:
           SHA: ${{ steps.main.outputs.sha }}
           TAG: ${{ steps.tag.outputs.tag }}
+          BRANCHES: ${{ steps.check.outputs.promote_branches }}
           # Pinned and checksum-verified (the job holds SENTRY_AUTH_TOKEN).
           SENTRY_CLI_VERSION: "3.7.0"
           SHA256_X86_64: "cec71d46a7cc394c94b6e75f1601985c710d457376c546ef3975567b3671563b"
@@ -454,11 +529,42 @@ jobs:
           fi
           chmod +x "$CLI"
           "$CLI" releases new "$SHA" >/dev/null 2>&1 || true
-          if "$CLI" releases deploys "$SHA" new -e production --name "$TAG"; then
-            echo "Sentry: production deploy $TAG on release $SHA"
-          else
-            echo "::warning::Recording the Sentry deploy failed; the release itself succeeded"
-          fi
+          for BRANCH in $BRANCHES; do
+            ENVIRONMENT=$(jq -r --arg b "$BRANCH" '.[] | select(.branch == $b) | .sentry_environment' "$RUNNER_TEMP/regions.json")
+            if "$CLI" releases deploys "$SHA" new -e "$ENVIRONMENT" --name "$TAG"; then
+              echo "Sentry: $ENVIRONMENT deploy $TAG on release $SHA"
+            else
+              echo "::warning::Recording the Sentry deploy for $ENVIRONMENT failed; the release itself succeeded"
+            fi
+          done
+
+      - name: Probe region health
+        # Only regions with a health_url. Each must answer 2xx (5 tries, 15s apart).
+        # The result feeds the Slack outcome and the final gate; this step itself
+        # doesn't fail, so the outcome is always reported first.
+        id: region_health
+        if: steps.promote.outcome == 'success'
+        env:
+          BRANCHES: ${{ steps.check.outputs.promote_branches }}
+        run: |
+          set -uo pipefail
+          BAD="" GOOD=""
+          for BRANCH in $BRANCHES; do
+            URL=$(jq -r --arg b "$BRANCH" '.[] | select(.branch == $b) | .health_url' "$RUNNER_TEMP/regions.json")
+            [ -z "$URL" ] && continue
+            CODE=000
+            for i in 1 2 3 4 5; do
+              CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 "$URL" 2>/dev/null || echo 000)
+              case "$CODE" in 2??) break ;; esac
+              [ "$i" -lt 5 ] && { echo "  $URL answered $CODE (try $i/5); retrying in 15s"; sleep 15; }
+            done
+            case "$CODE" in
+              2??) echo "$BRANCH healthy ($URL answered $CODE)"; GOOD="$GOOD $BRANCH" ;;
+              *) echo "::warning::$BRANCH unhealthy ($URL answered $CODE)"; BAD="$BAD $BRANCH" ;;
+            esac
+          done
+          echo "healthy=${GOOD# }" >> "$GITHUB_OUTPUT"
+          echo "unhealthy=${BAD# }" >> "$GITHUB_OUTPUT"
 
       - name: Post Slack release outcome
         if: always() && steps.slack_root.outputs.thread_ts != ''
@@ -472,14 +578,21 @@ jobs:
           DEPLOY: ${{ steps.do_deploy.outcome }}
           PHASE: ${{ steps.do_deploy.outputs.phase }}
           HEALTH: ${{ steps.do_deploy.outputs.health }}
+          BRANCHES: ${{ steps.check.outputs.promote_branches }}
+          REGIONS_OK: ${{ steps.region_health.outputs.healthy }}
+          REGIONS_BAD: ${{ steps.region_health.outputs.unhealthy }}
         run: |
           set -uo pipefail
           if [ "$PROMOTE" != "success" ]; then
-            TEXT="❌ *Promotion did not complete* (promote step: \`${PROMOTE:-did-not-run}\`). \`production\` was not advanced."
+            TEXT="❌ *Promotion did not complete* (promote step: \`${PROMOTE:-did-not-run}\`). \`${BRANCHES:-production}\` was not advanced."
+          elif [ -n "$REGIONS_BAD" ]; then
+            TEXT="🚨 *Promoted* \`${TAG}\`, but these regions are not healthy: ${REGIONS_BAD}.${REGIONS_OK:+ Healthy: ${REGIONS_OK}.} Treat it as a live incident."
+          elif [ -n "$REGIONS_OK" ]; then
+            TEXT="✅ *Promoted and healthy* (\`${TAG}\`): ${REGIONS_OK} answering their health URLs."
           elif [ "$DEPLOY" = "skipped" ] || [ -z "$DEPLOY" ]; then
             # No DO deploy configured here, so this workflow can't see the rollout:
             # say what happened (the branch moved), not that it is live.
-            TEXT="➡️ *Promoted* \`${TAG}\` to the \`production\` branch. The deploy from that branch is not watched here; this is not a live verdict."
+            TEXT="➡️ *Promoted* \`${TAG}\` to \`${BRANCHES}\`. The deploy from that branch is not watched here; this is not a live verdict."
           elif [ "$DEPLOY" = "success" ]; then
             TEXT="✅ *Live on production* (\`${TAG}\`): deploy \`${PHASE:-?}\`, health \`${HEALTH:-not checked}\`."
           else
@@ -489,6 +602,14 @@ jobs:
             | curl -sS -o /dev/null -X POST https://slack.com/api/chat.postMessage \
                 -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" -H 'Content-Type: application/json; charset=utf-8' -d @- \
             || echo "::warning::Slack reply failed"
+
+      - name: Fail if a promoted region is unhealthy
+        if: steps.region_health.outputs.unhealthy != ''
+        env:
+          UNHEALTHY: ${{ steps.region_health.outputs.unhealthy }}
+        run: |
+          echo "::error::Promoted, but these regions are not answering their health URL: ${UNHEALTHY}. The new revision may not be serving there; treat it as a live incident."
+          exit 1
 
       - name: Final summary
         if: always()
