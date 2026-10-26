@@ -967,3 +967,29 @@ hygiene; storage overage is $0.02/GiB and is not the reason.
 The `v2` tag is a moving major-version pointer. Backwards-compatible changes
 land on `v2`; breaking input changes will publish under `v3`. Pin to a SHA if
 you need stricter immutability.
+
+## `reusable-branch-promote.yml` and the shared `/release` skill
+
+The estate's one production release for apps that ship by fast-forwarding a
+production branch (sidekick-labs/sre-brain#832). It verifies CI on the target, checks
+it can push, fast-forwards each production branch, tags `vYYYY.MM.DD.N`, creates the
+GitHub Release, and records a Sentry production deploy. Opt-in inputs:
+`release_bot`, `do_production_app_id` with `health_url`, `slack_thread`, `regions`
+(several regional branches with per-region Sentry environments and health probes),
+`fail_on_unhealthy_region` and `runner-label`. The header comment documents each one.
+
+Callers: jumpdrive-web and nutripod-web (here), luminality-web and fundbright-web
+(vendored copies).
+
+**This repo is the source of truth for two vendored files.**
+
+- `.github/workflows/reusable-branch-promote.yml` is copied byte-identical into
+  `luminalityai/.github` and `fundbright/.github`.
+- `skills/release/SKILL.md` is copied into each branch-promote app as
+  `.agents/skills/release/SKILL.md`, next to its own `.agents/release.toml` (settings)
+  and optional `.agents/release.md` (extra checks).
+
+Both are copies made by estate-sync `[[file]]` entries in each consumer's
+`.agents/estate.lock`, and estate-check fails a hand edit there. To change either:
+merge it here, then in each consumer run
+`estate-sync --source rarebit-one/.github=<checkout of main> .` and open the PR.
