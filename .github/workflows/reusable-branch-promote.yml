@@ -392,8 +392,12 @@ jobs:
           BRANCHES: ${{ steps.check.outputs.promote_branches }}
         run: |
           set -euo pipefail
+          # One atomic push for every branch: either all regions move or none do, so a
+          # rejected or dropped push can't leave some regions promoted with no records.
+          REFSPECS=()
+          for BRANCH in $BRANCHES; do REFSPECS+=("${SHA}:refs/heads/${BRANCH}"); done
+          git push --atomic origin "${REFSPECS[@]}"
           for BRANCH in $BRANCHES; do
-            git push origin "${SHA}:refs/heads/${BRANCH}"
             git fetch -q origin "$BRANCH"
             if [ "$(git rev-parse "origin/$BRANCH")" != "$SHA" ]; then
               echo "::error::$BRANCH did not move to $SHA"
@@ -567,13 +571,16 @@ jobs:
       - name: Probe region health
         # Only regions with a health_url. Each must answer 2xx (5 tries, 15s apart).
         # The result feeds the Slack outcome and the final gate; this step itself
-        # doesn't fail, so the outcome is always reported first.
+        # doesn't fail, so the outcome is always reported first. On a re-run where
+        # every branch is already at the target, it probes every configured region,
+        # so a retry can't bypass the health gate.
         id: region_health
-        if: steps.promote.outcome == 'success'
+        if: (steps.promote.outcome == 'success' || steps.check.outputs.skip == 'true') && !inputs.dry_run
         env:
           BRANCHES: ${{ steps.check.outputs.promote_branches }}
         run: |
           set -uo pipefail
+          [ -z "$BRANCHES" ] && BRANCHES=$(jq -r '.[].branch' "$RUNNER_TEMP/regions.json")
           BAD="" GOOD=""
           for BRANCH in $BRANCHES; do
             URL=$(jq -r --arg b "$BRANCH" '.[] | select(.branch == $b) | .health_url' "$RUNNER_TEMP/regions.json")
