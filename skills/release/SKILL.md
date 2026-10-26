@@ -111,9 +111,11 @@ confirmation says so.
      ```bash
      gh api "repos/{owner}/{repo}/commits/$SHA/check-runs" --paginate \
        --jq '.check_runs[] | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral") | "\(.name): \(.status)/\(.conclusion)"'
+     gh api "repos/{owner}/{repo}/commits/$SHA/status" \
+       --jq '.statuses[] | select(.state != "success") | "\(.context): \(.state)"'
      ```
-     Any failure is **Caution** (name it in the briefing); a still-running check is shown
-     as pending.
+     Any failure or error is **Caution** (name it in the briefing); a still-running
+     check-run or a `pending` legacy status is shown as pending.
 
 3. **Staging** (when `staging_health_url` is set): `curl -fsS --max-time 10 <url>`. Expect
    `status: ok`, and the SHA being promoted where the payload reports a release.
