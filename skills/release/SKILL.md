@@ -29,7 +29,7 @@ or change app specs.
 ```
 /release                 # pre-flight + briefing + confirm
 /release --dry-run       # same, but dispatch with dry_run=true
-/release --ref <sha>     # promote only up to <sha> (must be on main)
+/release --ref <sha>     # promote up to <sha> (must be on main); default: main HEAD at briefing time
 /release --target <name> # one region, for apps with a region input (see release.toml)
 /release --skip-checks   # straight to confirmation
 ```
@@ -156,10 +156,14 @@ The worst signal wins:
 Ask the human to choose: release, release up to a numbered commit or SHA, one region
 (when `region_input` is set), dry run, or abort. **Dispatch only on an explicit go.**
 
+**Always pass the full SHA the briefing covered as `ref`**, even for a plain release.
+Without it the workflow promotes whatever `main` is at dispatch time, which can include
+commits merged after the briefing that nobody reviewed or checked on staging.
+
 ```bash
 STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-gh workflow run <promote_workflow> --ref main \
-  [-f dry_run=true] [-f ref=<sha>] [-f <region_input>=<target|all>]
+gh workflow run <promote_workflow> --ref main -f ref=<full SHA from the briefing> \
+  [-f dry_run=true] [-f <region_input>=<target|all>]
 # Select the run by dispatch time, not by SHA: the run carries main's SHA, not the ref input.
 gh run list --workflow=<promote_workflow> --event workflow_dispatch --limit 5 \
   --json databaseId,createdAt,url --jq "[.[] | select(.createdAt >= \"$STARTED\")] | last"
