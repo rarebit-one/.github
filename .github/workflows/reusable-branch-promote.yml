@@ -55,9 +55,11 @@ on:
         default: "ci.yml"
       runner-label:
         description: >-
-          Runner label. Defaults to ubuntu-latest, which public callers need: the
-          estate's self-hosted runner groups refuse public repositories, and a refused
-          job queues forever without going red.
+          Runner label, or a JSON array of labels such as '["jdb","linux"]' (name the
+          OS: a bare `jdb` job can be taken by a macOS runner). Defaults to
+          ubuntu-latest, which public callers need: the estate's self-hosted runner
+          groups refuse public repositories, and a refused job queues forever without
+          going red.
         required: false
         type: string
         default: "ubuntu-latest"
@@ -103,7 +105,7 @@ concurrency:
 jobs:
   promote:
     name: Promote to Production
-    runs-on: ${{ inputs.runner-label }}
+    runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label }}
     # Covers the DO watch (25m) plus health retries and promote overhead.
     timeout-minutes: 45
     environment: production
