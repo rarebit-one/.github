@@ -80,7 +80,12 @@ confirmation says so.
    - A `--ref` that isn't on `main` is a **blocker**.
    - A missing production branch is a **blocker**: the workflow refuses to create one.
      It must be created at a known-good SHA by a human first.
-   - Every target branch already at `$SHA`: report a no-op and stop.
+   - Every target branch already at `$SHA` is **not automatically a no-op**: a previous
+     promote may have moved the branch and then failed its DO deploy, health gate or
+     smoke/tracking jobs. Find the last `<promote_workflow>` run for that SHA and run
+     the Phase 4 checks against it (records and live health). All good: report a
+     no-op and stop. Anything incomplete: report it, and offer the recovery from Phase 4
+     (a re-run of that workflow) instead of a new release.
    - Branches at different SHAs: show each branch's pending count. Number the commits
      so the human can pick a cutoff. Picking one re-runs this phase with that SHA.
    - Flag explicitly: database migrations (`git diff --stat "origin/<branch>..$SHA" -- '*db/migrate*' '*alembic*'`),
@@ -93,10 +98,22 @@ confirmation says so.
    ```
    - `success`: pass.
    - In progress: **Hold** until it finishes.
-   - **Empty: STOP, not a pass.** The promote would fail with "no CI run". Offer to
-     dispatch CI on `main` (`gh workflow run <ci_workflow> --ref main`) and wait. This
-     usually means the merge produced no `push` event.
+   - **Empty: STOP, not a pass.** The promote would fail with "no CI run". This usually
+     means the merge produced no `push` event. Offer to dispatch CI on `main`
+     (`gh workflow run <ci_workflow> --ref main`) **only if the workflow declares
+     `workflow_dispatch`** (`grep -n workflow_dispatch .github/workflows/<ci_workflow>`).
+     Otherwise follow `.agents/release.md`, or hand the decision to the human: a new
+     commit on `main` or a re-run of an existing run are the usual ways out.
    - Failure: **Hold**.
+   - **Every other check on that commit too.** The reusable only gates on
+     `ci_workflow`, so a red security scan, pin check or deploy job on the same commit
+     would otherwise go unnoticed:
+     ```bash
+     gh api "repos/{owner}/{repo}/commits/$SHA/check-runs" --paginate \
+       --jq '.check_runs[] | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral") | "\(.name): \(.status)/\(.conclusion)"'
+     ```
+     Any failure is **Caution** (name it in the briefing); a still-running check is shown
+     as pending.
 
 3. **Staging** (when `staging_health_url` is set): `curl -fsS --max-time 10 <url>`. Expect
    `status: ok`, and the SHA being promoted where the payload reports a release.
@@ -152,6 +169,7 @@ The worst signal wins:
 | Signal | Safe | Caution | Hold |
 |---|---|---|---|
 | CI on target | success | — | failing, in progress, or no run |
+| Other checks on target | all green | any failing or pending | — |
 | Staging (when configured) | ok, serving the target SHA | degraded, or serving a different SHA | unavailable or unreachable |
 | Sentry (24h) | nothing new | 1–3 new, low severity | new high-severity |
 | DO | no deploy in progress | Unknown | deploy in progress |
