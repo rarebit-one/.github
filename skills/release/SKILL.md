@@ -65,24 +65,28 @@ notes override this skill where they're more specific.
 
 **Skip to Phase 3 with `--skip-checks`.**
 
-1. **Pending commits, per production branch.**
+1. **Resolve the target, then the pending commits per production branch.** Every
+   check below uses `$SHA` as its upper bound, never `origin/main`, so a `--ref` cutoff
+   shows exactly what will ship.
    ```bash
    git fetch origin main                                   # a failure here is a blocker
    for b in <each region.branch>; do git fetch origin "$b" 2>/dev/null || true; done
-   git log origin/<branch>..origin/main --format="%h %s (%an)" --reverse   # per branch
+   SHA=$(git rev-parse "${REF:-origin/main}^{commit}")      # the full SHA that will ship
+   git merge-base --is-ancestor "$SHA" origin/main || echo "not on main: blocker"
+   git log "origin/<branch>..$SHA" --format="%h %s (%an)" --reverse   # per branch
    ```
+   - A `--ref` that isn't on `main` is a **blocker**.
    - A missing production branch is a **blocker**: the workflow refuses to create one.
      It must be created at a known-good SHA by a human first.
-   - Every target branch already at `main` (or at `--ref`): report a no-op and stop.
+   - Every target branch already at `$SHA`: report a no-op and stop.
    - Branches at different SHAs: show each branch's pending count. Number the commits
-     so the human can pick a cutoff.
-   - Flag explicitly: database migrations (`git diff --stat origin/<branch>..origin/main -- '*db/migrate*' '*alembic*'`),
-     `.do/` app-spec changes, and `.github/workflows/` changes.
+     so the human can pick a cutoff. Picking one re-runs this phase with that SHA.
+   - Flag explicitly: database migrations (`git diff --stat "origin/<branch>..$SHA" -- '*db/migrate*' '*alembic*'`),
+     `.do/` app-spec changes, and `.github/workflows/` changes, over the same range.
 
 2. **CI on the exact SHA being promoted.** The reusable gates on a successful
    `ci_workflow` run on `main` for that commit.
    ```bash
-   SHA=$(git rev-parse "${REF:-origin/main}")
    gh run list --workflow=<ci_workflow> --branch=main --commit "$SHA" --json status,conclusion --jq '.[0]'
    ```
    - `success`: pass.
