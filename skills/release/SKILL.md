@@ -63,7 +63,9 @@ notes override this skill where they're more specific.
 
 ## Phase 1: Pre-flight (run independent checks in parallel)
 
-**Skip to Phase 3 with `--skip-checks`.**
+**`--skip-checks` still resolves the target:** run the `git fetch` and `SHA=` lines in
+step 1, then go to Phase 3 with that SHA. Every other check is skipped, and the
+confirmation says so.
 
 1. **Resolve the target, then the pending commits per production branch.** Every
    check below uses `$SHA` as its upper bound, never `origin/main`, so a `--ref` cutoff
@@ -150,6 +152,7 @@ The worst signal wins:
 | Signal | Safe | Caution | Hold |
 |---|---|---|---|
 | CI on target | success | — | failing, in progress, or no run |
+| Staging (when configured) | ok, serving the target SHA | degraded, or serving a different SHA | unavailable or unreachable |
 | Sentry (24h) | nothing new | 1–3 new, low severity | new high-severity |
 | DO | no deploy in progress | Unknown | deploy in progress |
 | Production health | ok | degraded | unavailable or unreachable |
@@ -157,7 +160,8 @@ The worst signal wins:
 
 ## Phase 3: Confirm and dispatch
 
-Ask the human to choose: release, release up to a numbered commit or SHA, one region
+Ask the human to choose (with `--skip-checks`, show the target SHA and say that the
+checks were skipped): release, release up to a numbered commit or SHA, one region
 (when `region_input` is set), dry run, or abort. **Dispatch only on an explicit go.**
 
 **Always pass the full SHA the briefing covered as `ref`**, even for a plain release.
