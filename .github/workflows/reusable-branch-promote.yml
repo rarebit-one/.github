@@ -1,0 +1,506 @@
+name: Branch-promote to production
+
+# The canonical branch-promote production release, shared by every org that ships
+# by fast-forwarding a `production` branch (sidekick-labs/sre-brain#832).
+#
+# SOURCE OF TRUTH: rarebit-one/.github. luminalityai/.github and fundbright/.github
+# carry byte-identical copies vendored by estate-sync ([[file]] in their
+# .agents/estate.lock), and estate-check fails a hand edit there. Edit it HERE, then
+# run `estate-sync --source rarebit-one/.github=<checkout>` in each consumer. For that
+# reason this file references nothing org-specific: no `uses:` of an org's own
+# composite (Slack goes over curl), no hardcoded app ids or URLs.
+#
+# Every run that promotes leaves the three records the release standard requires:
+# a `vYYYY.MM.DD.N` tag at the promoted SHA, a GitHub Release with the commits since
+# the previous production SHA, and a Sentry production deploy on release=<sha>.
+#
+# Opt-in extras, all off by default so a minimal caller gets the minimal flow:
+#   release_bot           mint a GitHub App token (vars.RELEASE_BOT_CLIENT_ID +
+#                         secrets.RELEASE_BOT_PRIVATE_KEY) for the pushes, e.g. when
+#                         `production` is ruleset-protected or workflow files change.
+#   do_production_app_id  for a DO app with deploy_on_push=false: trigger the deploy,
+#                         watch it to a terminal phase, and fail the run if it isn't
+#                         ACTIVE. With health_url, also gate on its `.status`.
+#   slack_thread          post a "release started" root and an outcome reply to
+#                         vars.SLACK_RELEASE_CHANNEL_ID; output slack_thread_ts so the
+#                         caller can thread its own follow-ups (e.g. a smoke verdict).
+#
+# Callers grant `contents: write` and pass `secrets: inherit` (SENTRY_AUTH_TOKEN,
+# and DIGITALOCEAN_ACCESS_TOKEN / SLACK_BOT_TOKEN / RELEASE_BOT_PRIVATE_KEY when the
+# matching extra is on).
+
+on:
+  workflow_call:
+    inputs:
+      sentry_org:
+        required: true
+        type: string
+      sentry_project:
+        required: true
+        type: string
+      dry_run:
+        description: "Run every check (CI, branch state, write access, DO reachability) but change nothing."
+        required: false
+        type: boolean
+        default: false
+      ref:
+        description: "Commit on main to promote up to. Empty promotes main HEAD."
+        required: false
+        type: string
+        default: ""
+      ci_workflow:
+        description: "Workflow file whose run on main must have succeeded for the target SHA."
+        required: false
+        type: string
+        default: "ci.yml"
+      runner-label:
+        description: >-
+          Runner label. Defaults to ubuntu-latest, which public callers need: the
+          estate's self-hosted runner groups refuse public repositories, and a refused
+          job queues forever without going red.
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      release_bot:
+        description: "Push with a release-bot GitHub App token instead of GITHUB_TOKEN."
+        required: false
+        type: boolean
+        default: false
+      do_production_app_id:
+        description: "DigitalOcean production app id. When set, this workflow deploys it and watches it live."
+        required: false
+        type: string
+        default: ""
+      health_url:
+        description: "With do_production_app_id: URL whose JSON `.status` must be ok (degraded warns) after the deploy."
+        required: false
+        type: string
+        default: ""
+      slack_thread:
+        description: "Post a release thread to vars.SLACK_RELEASE_CHANNEL_ID (soft-fails when unconfigured)."
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      tag:
+        description: "The release tag cut (empty on a no-op or dry run)."
+        value: ${{ jobs.promote.outputs.tag }}
+      sha:
+        description: "The promoted SHA."
+        value: ${{ jobs.promote.outputs.sha }}
+      slack_thread_ts:
+        description: "ts of the Slack release thread root (empty if none was posted)."
+        value: ${{ jobs.promote.outputs.slack_thread_ts }}
+
+# Never cancel an in-progress promotion.
+concurrency:
+  group: promote-production
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote to Production
+    runs-on: ${{ inputs.runner-label }}
+    # Covers the DO watch (25m) plus health retries and promote overhead.
+    timeout-minutes: 45
+    environment: production
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      sha: ${{ steps.main.outputs.sha }}
+      slack_thread_ts: ${{ steps.slack_root.outputs.thread_ts }}
+    env:
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      SENTRY_ORG: ${{ inputs.sentry_org }}
+      SENTRY_PROJECT: ${{ inputs.sentry_project }}
+
+    steps:
+      - name: Mint release-bot token
+        id: bot
+        if: inputs.release_bot
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-workflows: write
+
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          # Persisted so the production and tag pushes below use it.
+          token: ${{ steps.bot.outputs.token || secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        # `git tag -a` records a tagger; the runner has none by default.
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Determine target SHA
+        id: main
+        env:
+          REF_INPUT: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          if [ -n "$REF_INPUT" ]; then
+            if ! git rev-parse --verify "${REF_INPUT}^{commit}" >/dev/null 2>&1; then
+              echo "::error::Ref '$REF_INPUT' is not a valid commit"
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "$REF_INPUT" HEAD; then
+              echo "::error::Ref '$REF_INPUT' is not on main; only commits on main can be promoted"
+              exit 1
+            fi
+            SHA=$(git rev-parse "${REF_INPUT}^{commit}")
+          else
+            SHA=$(git rev-parse HEAD)
+          fi
+          echo "Promoting up to $SHA"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Verify CI passed on main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ steps.main.outputs.sha }}
+          CI_WORKFLOW: ${{ inputs.ci_workflow }}
+        run: |
+          set -uo pipefail
+          CONCLUSION=""
+          for i in 1 2 3; do
+            CONCLUSION=$(gh run list --workflow="$CI_WORKFLOW" --branch=main --json headSha,conclusion \
+              --jq ".[] | select(.headSha == \"$SHA\") | .conclusion" | head -1)
+            [ -n "$CONCLUSION" ] && break
+            echo "No $CI_WORKFLOW run for $SHA yet, retrying in 10s (attempt $i/3)"
+            sleep 10
+          done
+          if [ -z "$CONCLUSION" ]; then
+            echo "::error::No $CI_WORKFLOW run found on main for $SHA"
+            exit 1
+          fi
+          if [ "$CONCLUSION" != "success" ]; then
+            echo "::error::$CI_WORKFLOW concluded '$CONCLUSION' for $SHA (expected success)"
+            exit 1
+          fi
+          echo "$CI_WORKFLOW passed for $SHA"
+
+      - name: Check production branch state
+        id: check
+        env:
+          SHA: ${{ steps.main.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if ! git rev-parse --verify origin/production >/dev/null 2>&1; then
+            echo "::error::The production branch does not exist; create it first"
+            exit 1
+          fi
+          PROD_SHA=$(git rev-parse origin/production)
+          echo "prod_sha=$PROD_SHA" >> "$GITHUB_OUTPUT"
+          if [ "$SHA" = "$PROD_SHA" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::production is already at $SHA; nothing to promote"
+            exit 0
+          fi
+          if ! git merge-base --is-ancestor origin/production "$SHA"; then
+            echo "::error::production has diverged from main; resolve it by hand"
+            exit 1
+          fi
+          echo "commit_count=$(git rev-list "origin/production..$SHA" --count)" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Preflight - verify write access to production
+        # A dry-run push, so a caller missing `contents: write` (or a bot token without
+        # access) fails here with a clear message instead of a 403 mid-promote. Runs on
+        # dry runs too, which makes a dry run a real test of release permissions.
+        if: steps.check.outputs.skip != 'true'
+        env:
+          SHA: ${{ steps.main.outputs.sha }}
+        run: |
+          if ! git push --dry-run origin "${SHA}:refs/heads/production" 2>push.err; then
+            echo "::error::Cannot push to production. The caller must grant 'permissions: contents: write' (or the release bot needs access). $(tr '\n' ' ' < push.err)"
+            exit 1
+          fi
+          echo "Write access to production confirmed"
+
+      - name: Generate release tag
+        id: tag
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          PREFIX="v$(date -u +%Y.%m.%d)"
+          LAST=$(git tag -l "${PREFIX}.*" | sed "s/^${PREFIX}\.//" | sort -n | tail -1)
+          TAG="${PREFIX}.$(( ${LAST:-0} + 1 ))"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $TAG"
+
+      - name: Write deploy summary
+        if: steps.check.outputs.skip != 'true'
+        env:
+          SHA: ${{ steps.main.outputs.sha }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          COUNT: ${{ steps.check.outputs.commit_count }}
+        run: |
+          {
+            echo "## Production promotion"
+            echo
+            [ "$DRY_RUN" = "true" ] && { echo "> **Dry run**: nothing will be promoted"; echo; }
+            echo "**Tag:** \`$TAG\`  "
+            echo "**SHA:** \`$SHA\`  "
+            echo "**Commits:** $COUNT"
+            echo
+            git log "origin/production..$SHA" --format="- %h %s" --reverse
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post Slack release thread root
+        id: slack_root
+        # Posted before the promote so a failed promote still threads its outcome.
+        if: inputs.slack_thread && steps.check.outputs.skip != 'true' && inputs.dry_run != true
+        continue-on-error: true
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          CHANNEL: ${{ vars.SLACK_RELEASE_CHANNEL_ID }}
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+          SHA: ${{ steps.main.outputs.sha }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          COUNT: ${{ steps.check.outputs.commit_count }}
+        run: |
+          set -uo pipefail
+          if [ -z "${SLACK_BOT_TOKEN:-}" ] || [ -z "${CHANNEL:-}" ]; then
+            echo "::warning::SLACK_BOT_TOKEN or vars.SLACK_RELEASE_CHANNEL_ID is not set; no Slack thread"
+            exit 0
+          fi
+          # PRs in this release, from squash subjects ending "(#N)", capped at 15.
+          PRS="" total=0 shown=0
+          while IFS= read -r subject; do
+            if [[ "$subject" =~ ^(.*)\ \(#([0-9]+)\)$ ]]; then
+              total=$((total + 1))
+              if [ "$shown" -lt 15 ]; then
+                title="${BASH_REMATCH[1]}"; title="${title//&/&amp;}"; title="${title//</&lt;}"; title="${title//>/&gt;}"
+                PRS+="• <${SERVER_URL}/${REPO}/pull/${BASH_REMATCH[2]}|#${BASH_REMATCH[2]} ${title}>"$'\n'
+                shown=$((shown + 1))
+              fi
+            fi
+          done < <(git log "origin/production..$SHA" --format=%s --reverse)
+          [ "$total" -gt "$shown" ] && PRS+="…and $((total - shown)) more"$'\n'
+          TEXT=$(printf '%s\n' \
+            "🚀 *Production release started*: \`${REPO}\`" \
+            "*Tag:* <${SERVER_URL}/${REPO}/releases/tag/${TAG}|${TAG}>" \
+            "*Commit:* \`${SHA:0:9}\` (${COUNT} commit(s))")
+          [ -n "$PRS" ] && TEXT+=$'\n'"*PRs:*"$'\n'"${PRS%$'\n'}"
+          RESP=$(jq -n --arg ch "$CHANNEL" --arg text "$TEXT" '{channel:$ch, text:$text, unfurl_links:false}' \
+            | curl -sS -X POST https://slack.com/api/chat.postMessage \
+                -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" -H 'Content-Type: application/json; charset=utf-8' -d @-)
+          if [ "$(jq -r '.ok' <<<"$RESP")" = "true" ]; then
+            echo "thread_ts=$(jq -r '.ts' <<<"$RESP")" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Slack post failed: $(jq -r '.error // "unknown"' <<<"$RESP")"
+          fi
+
+      - name: Promote main to production
+        id: promote
+        if: steps.check.outputs.skip != 'true' && inputs.dry_run != true
+        env:
+          SHA: ${{ steps.main.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git push origin "${SHA}:refs/heads/production"
+          git fetch -q origin production
+          if [ "$(git rev-parse origin/production)" != "$SHA" ]; then
+            echo "::error::production did not move to $SHA"
+            exit 1
+          fi
+          echo "production is at $SHA"
+
+      - name: Create release tag
+        # Fail-soft: the promote already happened, and a tag hiccup must not skip the
+        # Release and Sentry steps. Idempotent so a re-run doesn't error.
+        if: steps.promote.outcome == 'success'
+        continue-on-error: true
+        env:
+          SHA: ${{ steps.main.outputs.sha }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::notice::$TAG already exists"
+            exit 0
+          fi
+          git tag -a "$TAG" "$SHA" -m "Production release $TAG"
+          git push origin "$TAG"
+
+      - name: Create GitHub Release
+        if: steps.promote.outcome == 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token || secrets.GITHUB_TOKEN }}
+          SHA: ${{ steps.main.outputs.sha }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          PREV_SHA: ${{ steps.check.outputs.prod_sha }}
+        run: |
+          set -uo pipefail
+          COUNT=$(git rev-list "${PREV_SHA}..${SHA}" --count)
+          NOTES=$(git log "${PREV_SHA}..${SHA}" --format="- %h %s (%an)" --reverse | head -50)
+          [ "$COUNT" -gt 50 ] && NOTES+=$'\n'"_($((COUNT - 50)) more commits not shown)_"
+          gh release create "$TAG" --title "$TAG" --notes "$NOTES" --target "$SHA" --latest
+
+      - name: Deploy to DigitalOcean and watch it live
+        # Only when the caller names the production app (deploy_on_push=false apps:
+        # promoting alone deploys nothing). Not continue-on-error: a deploy that
+        # doesn't go live must turn the run red. On a dry run it only checks that the
+        # token can see the app.
+        id: do_deploy
+        if: inputs.do_production_app_id != '' && steps.check.outputs.skip != 'true' && (inputs.dry_run || steps.promote.outcome == 'success')
+        env:
+          DO_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          APP_ID: ${{ inputs.do_production_app_id }}
+          HEALTH_URL: ${{ inputs.health_url }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -uo pipefail
+          API="https://api.digitalocean.com/v2"
+          if [ -z "${DO_TOKEN:-}" ]; then
+            echo "::error::DIGITALOCEAN_ACCESS_TOKEN is not set, so production was promoted but app ${APP_ID} was NOT deployed"
+            exit 1
+          fi
+          AUTH="Authorization: Bearer ${DO_TOKEN}"
+          HTTP=$(curl -sS -o app.json -w '%{http_code}' -H "$AUTH" "${API}/apps/${APP_ID}")
+          if [ "$HTTP" != "200" ]; then
+            echo "::error::DigitalOcean returned HTTP ${HTTP} for app ${APP_ID}; check the token. $(tr -d '\n' < app.json | head -c 300)"
+            exit 1
+          fi
+          NAME=$(jq -r '.app.spec.name // "unknown"' app.json)
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "::notice::Dry run: token can see ${NAME} (${APP_ID}); not deploying"
+            echo "phase=DRY_RUN" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          HTTP=$(curl -sS -o dep.json -w '%{http_code}' -X POST -H "$AUTH" -H "Content-Type: application/json" \
+            -d '{"force_build":false}' "${API}/apps/${APP_ID}/deployments")
+          if [ "$HTTP" != "200" ] && [ "$HTTP" != "201" ]; then
+            echo "::error::Creating the deployment failed (HTTP ${HTTP}). $(tr -d '\n' < dep.json | head -c 300)"
+            exit 1
+          fi
+          DEP=$(jq -r '.deployment.id' dep.json)
+          echo "Deployment ${DEP} for ${NAME}; watching"
+          DEADLINE=$(( $(date +%s) + 1500 ))
+          PHASE=UNKNOWN
+          while :; do
+            curl -sS -o get.json -H "$AUTH" "${API}/apps/${APP_ID}/deployments/${DEP}" || true
+            PHASE=$(jq -r '.deployment.phase // "UNKNOWN"' get.json 2>/dev/null || echo UNKNOWN)
+            echo "  phase: ${PHASE}"
+            case "$PHASE" in ACTIVE|ERROR|CANCELED|SUPERSEDED) break ;; esac
+            if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+              echo "phase=$PHASE" >> "$GITHUB_OUTPUT"
+              echo "::error::Deployment ${DEP} did not finish within 25 minutes (last phase ${PHASE})"
+              exit 1
+            fi
+            sleep 20
+          done
+          echo "phase=$PHASE" >> "$GITHUB_OUTPUT"
+          if [ "$PHASE" != "ACTIVE" ]; then
+            echo "::error::Deployment ${DEP} ended ${PHASE}; production is promoted but the live build is the previous one"
+            exit 1
+          fi
+          [ -z "$HEALTH_URL" ] && exit 0
+          STATUS=unreachable
+          for i in 1 2 3 4 5 6; do
+            STATUS=$(curl -sS --max-time 12 "$HEALTH_URL" | jq -r '.status // "unreachable"' 2>/dev/null || echo unreachable)
+            [ "$STATUS" = "ok" ] && break
+            [ "$i" -lt 6 ] && { echo "  health ${i}/6: ${STATUS}; retrying in 15s"; sleep 15; }
+          done
+          echo "health=$STATUS" >> "$GITHUB_OUTPUT"
+          case "$STATUS" in
+            ok) echo "::notice::${HEALTH_URL} is ok" ;;
+            degraded) echo "::warning::${HEALTH_URL} is degraded: serving, but a subsystem is unhealthy" ;;
+            *) echo "::error::${HEALTH_URL} is ${STATUS} after retries; the deploy is ACTIVE but not serving"; exit 1 ;;
+          esac
+
+      - name: Record the Sentry production deploy
+        if: steps.promote.outcome == 'success'
+        continue-on-error: true
+        env:
+          SHA: ${{ steps.main.outputs.sha }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          # Pinned and checksum-verified (the job holds SENTRY_AUTH_TOKEN).
+          SENTRY_CLI_VERSION: "3.7.0"
+          SHA256_X86_64: "cec71d46a7cc394c94b6e75f1601985c710d457376c546ef3975567b3671563b"
+          SHA256_AARCH64: "69cc0e951f663a332fd3bb3069e443cb3748abbfce497ae2caac6d5a9ec7ae65"
+        run: |
+          set -uo pipefail
+          if [ -z "${SENTRY_AUTH_TOKEN:-}" ]; then
+            echo "::warning::SENTRY_AUTH_TOKEN is not set; no Sentry deploy recorded"
+            exit 0
+          fi
+          case "$(uname -m)" in
+            x86_64) ARCH=x86_64; SUM=$SHA256_X86_64 ;;
+            aarch64) ARCH=aarch64; SUM=$SHA256_AARCH64 ;;
+            *) echo "::warning::No sentry-cli build for $(uname -m)"; exit 0 ;;
+          esac
+          CLI="${RUNNER_TEMP}/sentry-cli"
+          if ! curl -fsSL -o "$CLI" "https://github.com/getsentry/sentry-cli/releases/download/${SENTRY_CLI_VERSION}/sentry-cli-Linux-${ARCH}" \
+            || ! echo "${SUM}  ${CLI}" | sha256sum -c -; then
+            echo "::warning::sentry-cli download or checksum failed; no Sentry deploy recorded"
+            exit 0
+          fi
+          chmod +x "$CLI"
+          "$CLI" releases new "$SHA" >/dev/null 2>&1 || true
+          if "$CLI" releases deploys "$SHA" new -e production --name "$TAG"; then
+            echo "Sentry: production deploy $TAG on release $SHA"
+          else
+            echo "::warning::Recording the Sentry deploy failed; the release itself succeeded"
+          fi
+
+      - name: Post Slack release outcome
+        if: always() && steps.slack_root.outputs.thread_ts != ''
+        continue-on-error: true
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          CHANNEL: ${{ vars.SLACK_RELEASE_CHANNEL_ID }}
+          THREAD_TS: ${{ steps.slack_root.outputs.thread_ts }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          PROMOTE: ${{ steps.promote.outcome }}
+          DEPLOY: ${{ steps.do_deploy.outcome }}
+          PHASE: ${{ steps.do_deploy.outputs.phase }}
+          HEALTH: ${{ steps.do_deploy.outputs.health }}
+        run: |
+          set -uo pipefail
+          if [ "$PROMOTE" != "success" ]; then
+            TEXT="❌ *Promotion did not complete* (promote step: \`${PROMOTE:-did-not-run}\`). \`production\` was not advanced."
+          elif [ "$DEPLOY" = "skipped" ] || [ -z "$DEPLOY" ]; then
+            TEXT="✅ *Promoted* \`${TAG}\` to \`production\`."
+          elif [ "$DEPLOY" = "success" ]; then
+            TEXT="✅ *Live on production* (\`${TAG}\`): deploy \`${PHASE:-?}\`, health \`${HEALTH:-not checked}\`."
+          else
+            TEXT="⚠️ *Promoted but not confirmed live* (\`${TAG}\`): deploy phase \`${PHASE:-n/a}\`, health \`${HEALTH:-n/a}\`. A rollback may be needed."
+          fi
+          jq -n --arg ch "$CHANNEL" --arg ts "$THREAD_TS" --arg text "$TEXT" '{channel:$ch, thread_ts:$ts, text:$text, unfurl_links:false}' \
+            | curl -sS -o /dev/null -X POST https://slack.com/api/chat.postMessage \
+                -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" -H 'Content-Type: application/json; charset=utf-8' -d @- \
+            || echo "::warning::Slack reply failed"
+
+      - name: Final summary
+        if: always()
+        env:
+          SHA: ${{ steps.main.outputs.sha }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          SKIP: ${{ steps.check.outputs.skip }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          PROMOTE: ${{ steps.promote.outcome }}
+          DEPLOY: ${{ steps.do_deploy.outcome }}
+          PHASE: ${{ steps.do_deploy.outputs.phase }}
+        run: |
+          if [ "$SKIP" = "true" ]; then
+            echo "::notice::No-op: production is already at $SHA"
+          elif [ "$DRY_RUN" = "true" ]; then
+            echo "::notice::Dry run complete: would promote $TAG ($SHA); DO check: ${DEPLOY:-not configured}"
+          elif [ "$PROMOTE" != "success" ]; then
+            echo "::error::Promotion did not complete (promote step: ${PROMOTE:-did-not-run}); production was not advanced"
+          elif [ "$DEPLOY" = "failure" ]; then
+            echo "::error::Promoted $TAG ($SHA) but the DO deploy did not go live (phase ${PHASE:-n/a})"
+          else
+            echo "::notice::Released $TAG ($SHA)"
+          fi
