@@ -152,7 +152,7 @@ jobs:
               if echo "$PUSH_BEFORE" | grep -qE '^0+$'; then
                 base=""
                 if [ -n "$DEFAULT_BRANCH" ] && git fetch --quiet origin "$DEFAULT_BRANCH" 2>/dev/null; then
-                  base="$(git merge-base --quiet "origin/$DEFAULT_BRANCH" "$head" 2>/dev/null || true)"
+                  base="$(git merge-base "origin/$DEFAULT_BRANCH" "$head" 2>/dev/null || true)"
                 fi
                 if [ -n "$base" ] && ! git rev-parse --verify --quiet "${base}^{commit}" >/dev/null; then
                   base=""
