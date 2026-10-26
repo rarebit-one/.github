@@ -477,7 +477,9 @@ jobs:
           if [ "$PROMOTE" != "success" ]; then
             TEXT="❌ *Promotion did not complete* (promote step: \`${PROMOTE:-did-not-run}\`). \`production\` was not advanced."
           elif [ "$DEPLOY" = "skipped" ] || [ -z "$DEPLOY" ]; then
-            TEXT="✅ *Promoted* \`${TAG}\` to \`production\`."
+            # No DO deploy configured here, so this workflow can't see the rollout:
+            # say what happened (the branch moved), not that it is live.
+            TEXT="➡️ *Promoted* \`${TAG}\` to the \`production\` branch. The deploy from that branch is not watched here; this is not a live verdict."
           elif [ "$DEPLOY" = "success" ]; then
             TEXT="✅ *Live on production* (\`${TAG}\`): deploy \`${PHASE:-?}\`, health \`${HEALTH:-not checked}\`."
           else
