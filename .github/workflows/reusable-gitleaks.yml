@@ -151,8 +151,17 @@ jobs:
               head="$PUSH_SHA"
               if echo "$PUSH_BEFORE" | grep -qE '^0+$'; then
                 base=""
-                if [ -n "$DEFAULT_BRANCH" ] && git fetch --quiet origin "$DEFAULT_BRANCH" 2>/dev/null; then
-                  base="$(git merge-base "origin/$DEFAULT_BRANCH" "$head" 2>/dev/null || true)"
+                if [ -n "$DEFAULT_BRANCH" ]; then
+                  # fetch-depth: 0 already brought every branch, so prefer the
+                  # remote-tracking ref that is here; fetch only if it is missing
+                  # (checkout runs with persist-credentials: false, so a fetch may
+                  # not be able to authenticate and must not be the only path).
+                  if ! git rev-parse --verify --quiet "origin/$DEFAULT_BRANCH^{commit}" >/dev/null; then
+                    git fetch --quiet origin "$DEFAULT_BRANCH" 2>/dev/null || true
+                  fi
+                  if git rev-parse --verify --quiet "origin/$DEFAULT_BRANCH^{commit}" >/dev/null; then
+                    base="$(git merge-base "origin/$DEFAULT_BRANCH" "$head" 2>/dev/null || true)"
+                  fi
                 fi
                 if [ -n "$base" ] && ! git rev-parse --verify --quiet "${base}^{commit}" >/dev/null; then
                   base=""
