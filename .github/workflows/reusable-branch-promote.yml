@@ -99,6 +99,14 @@ on:
         required: false
         type: string
         default: ""
+      fail_on_unhealthy_region:
+        description: >-
+          Fail this run when a region's health_url doesn't answer 2xx. Set false to
+          report it only (outputs.unhealthy_regions) and gate in the caller, e.g. after
+          jobs that need this one to succeed, such as DO deploy tracking.
+        required: false
+        type: boolean
+        default: true
     outputs:
       tag:
         description: "The release tag cut (empty on a no-op or dry run)."
@@ -604,7 +612,7 @@ jobs:
             || echo "::warning::Slack reply failed"
 
       - name: Fail if a promoted region is unhealthy
-        if: steps.region_health.outputs.unhealthy != ''
+        if: inputs.fail_on_unhealthy_region && steps.region_health.outputs.unhealthy != ''
         env:
           UNHEALTHY: ${{ steps.region_health.outputs.unhealthy }}
         run: |
