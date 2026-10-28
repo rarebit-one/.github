@@ -186,12 +186,24 @@ runs:
 
         # ── 2. Otherwise resolve newest patch of the major (or exact X.Y.Z) ─
         if [ -z "$resolved" ]; then
+          # Three input shapes: X.Y.Z is exact; X and X.Y are prefixes that
+          # resolve to the newest artifact under them. The prefix's dots are
+          # escaped before they reach grep, and the tail pattern is sized to the
+          # components that are missing ("16.15" wants one more, "16" wants two).
           if printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             resolved="$VERSION"
           else
+            if printf '%s' "$VERSION" | grep -qE '^[0-9]+$'; then
+              tail_pattern='\.[0-9]+\.[0-9]+'
+            elif printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+$'; then
+              tail_pattern='\.[0-9]+'
+            else
+              echo "::error::version must be X, X.Y or X.Y.Z (got '$VERSION')"; exit 1
+            fi
+            prefix="$(printf '%s' "$VERSION" | sed 's/\./\\./g')"
             echo "resolving newest $VERSION.x from Maven Central metadata…"
             fetch "$ARTIFACT/maven-metadata.xml" "$WORK/maven-metadata.xml" 60
-            resolved="$(grep -oE "<version>${VERSION}\.[0-9]+\.[0-9]+</version>" "$WORK/maven-metadata.xml" \
+            resolved="$(grep -oE "<version>${prefix}${tail_pattern}</version>" "$WORK/maven-metadata.xml" \
               | sed -E 's/<[^>]+>//g' | sort -V | tail -1)"
           fi
           if [ -z "${resolved:-}" ]; then
@@ -233,8 +245,10 @@ runs:
         echo "initdb complete (superuser=$USERNAME)"
 
         # ── 6. Create the requested database up front if not the default ────
-        #    zonky ships no psql/createdb → use the single-user backend.
-        if [ "$DATABASE" != "postgres" ] && [ "$DATABASE" != "$USERNAME" ]; then
+        #    zonky ships no psql/createdb → use the single-user backend. initdb
+        #    creates only postgres/template0/template1, never one named after
+        #    the superuser, so the username is no reason to skip this.
+        if [ "$DATABASE" != "postgres" ]; then
           echo "CREATE DATABASE \"$DATABASE\";" \
             | "$PGROOT/bin/postgres" --single -D "$PGDATA" postgres >/dev/null
           echo "created database $DATABASE"
