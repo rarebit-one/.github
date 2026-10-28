@@ -1,0 +1,264 @@
+# Org-shared composite — stand up an ephemeral PostgreSQL in CI with NO root,
+# NO docker socket and NO apt. Consume it with:
+#
+#   uses: rarebit-one/.github/.github/actions/setup-postgres@main
+#     with:
+#       version: "17"          # postgres major — PIN your app's production major; resolves newest patch
+#   # then, in any later step:
+#   env: { DATABASE_URL: "${{ env.DATABASE_URL }}" }   # already exported to $GITHUB_ENV
+#
+# WHY THIS EXISTS
+#   The jumpdrive-broker (`jdb`) runners execute each job inside an ephemeral,
+#   rootless-podman container that is deliberately unprivileged:
+#   `--security-opt no-new-privileges`, no docker API, no sudo. That means the
+#   two usual ways to get a database in CI are BOTH unavailable there:
+#     - `services:` containers   → need the docker/container API  → absent
+#     - `apt-get install postgresql` / `sudo` → need root          → absent
+#   So this action stands postgres up ENTIRELY in user space: it downloads a
+#   relocatable postgres build (zonky's `embedded-postgres-binaries` from Maven
+#   Central — per-OS/arch tarballs of a self-contained, relocatable server),
+#   `initdb`s a throwaway cluster under $RUNNER_TEMP, and `pg_ctl start`s it as
+#   the normal runner user (postgres refuses to run as root — the unprivileged
+#   user is not a workaround here, it is the supported configuration).
+#
+#   It works UNCHANGED on GitHub-hosted `ubuntu-latest` too: nothing here is
+#   jdb-specific — same download, same user-space cluster.
+#
+# NOTES
+#   - zonky's linux tarballs ship ONLY the server trio (initdb/pg_ctl/postgres),
+#     no psql/pg_isready/createdb. Readiness therefore uses `pg_ctl -w` (+ a TCP
+#     probe), and an extra database is created via the single-user backend — no
+#     client binary is required. Your app connects through libpq/its driver
+#     using the exported DATABASE_URL, which needs no psql on the runner.
+#   - Auth is `trust` on a throwaway cluster bound to 127.0.0.1 — correct for
+#     disposable CI, never for anything that outlives the job.
+#   - Mirrored verbatim from luminalityai/.github (the upstream copy, which was
+#     verified on amd64 + arm64 jdb runners). Fix bugs there first, then here;
+#     the sibling org .github repos each hold the same file, so every consumer
+#     switches with a one-line `uses:` change.
+name: "Setup PostgreSQL (root-free)"
+description: >
+  Stand up an ephemeral, relocatable PostgreSQL in CI with no root, no docker
+  socket and no apt — works on unprivileged jumpdrive-broker (jdb) runners and
+  on GitHub-hosted ubuntu-latest alike. Exports DATABASE_URL + PG* to the env.
+
+inputs:
+  version:
+    description: >
+      PostgreSQL major version. Defaults to 18, the estate CI target
+      (rarebit-one/rarebit-sre#376). Callers whose production database is on an
+      older major should pin it explicitly (e.g. "17") so CI keeps proving what
+      prod can run. A bare major ("18") or major.minor resolves to the newest
+      matching patch on Maven Central; an exact "X.Y.Z" is used as-is.
+    required: false
+    default: "18"
+  port:
+    description: "TCP port to listen on (127.0.0.1)."
+    required: false
+    default: "5432"
+  database:
+    description: "Database to ensure exists (created if not the default)."
+    required: false
+    default: "postgres"
+  username:
+    description: "Superuser role to initialise the cluster with."
+    required: false
+    default: "postgres"
+
+outputs:
+  database-url:
+    description: "postgresql:// URL for the running cluster (also exported to $GITHUB_ENV)."
+    value: ${{ steps.up.outputs.database-url }}
+
+runs:
+  using: "composite"
+  steps:
+    # ── 0. Classifier first, so the cache key can name it ─────────────────
+    - id: classify
+      shell: bash
+      run: |
+        set -euo pipefail
+        os="$(uname -s)"; arch="$(uname -m)"
+        if [ "$os" != "Linux" ]; then
+          echo "::error::setup-postgres supports Linux runners only (got $os)"; exit 1
+        fi
+        case "$arch" in
+          x86_64|amd64)  classifier="linux-amd64" ;;
+          aarch64|arm64) classifier="linux-arm64v8" ;;
+          *) echo "::error::unsupported arch '$arch'"; exit 1 ;;
+        esac
+        echo "runner: $os/$arch → zonky classifier $classifier"
+        echo "classifier=$classifier" >> "$GITHUB_OUTPUT"
+        : "${RUNNER_TEMP:?RUNNER_TEMP must be set}"
+        echo "cache-dir=$RUNNER_TEMP/setup-postgres/cache" >> "$GITHUB_OUTPUT"
+
+    # ── 0b. The jar, cached across jobs AND runs ─────────────────────────
+    # Maven Central rate-limits GitHub's runners (HTTP 429) for stretches of an
+    # hour or more, and every job of every workflow re-downloaded the same jar
+    # through it (rarebit-one/rarebit-sre#483 took the whole luminality lane
+    # down for ~2 h). Keyed on classifier + the requested version input, so a
+    # bare major ("17") is served from cache until the entry is evicted (7 days
+    # unused); the newest patch is re-resolved on the next miss. The post-job
+    # save runs only when the key missed; the content under one key is
+    # immutable, and the jar's own SHA-1 is re-verified on every hit.
+    - id: cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.classify.outputs.cache-dir }}
+        key: setup-postgres-v1-${{ steps.classify.outputs.classifier }}-${{ inputs.version }}
+
+    - id: up
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_PORT: ${{ inputs.port }}
+        INPUT_DATABASE: ${{ inputs.database }}
+        INPUT_USERNAME: ${{ inputs.username }}
+        CLASSIFIER: ${{ steps.classify.outputs.classifier }}
+        CACHE: ${{ steps.classify.outputs.cache-dir }}
+      run: |
+        set -euo pipefail
+
+        VERSION="${INPUT_VERSION:-16}"
+        PORT="${INPUT_PORT:-5432}"
+        DATABASE="${INPUT_DATABASE:-postgres}"
+        USERNAME="${INPUT_USERNAME:-postgres}"
+        classifier="$CLASSIFIER"
+
+        : "${RUNNER_TEMP:?RUNNER_TEMP must be set}"
+        WORK="$RUNNER_TEMP/setup-postgres"
+        PGROOT="$WORK/dist"
+        PGDATA="$WORK/data"
+        LOGFILE="$WORK/postgres.log"
+        mkdir -p "$WORK" "$CACHE"
+
+        # Two sources for the same artefacts: Maven Central itself, and Google's
+        # public read-through mirror of it. repo1.maven.org has throttled
+        # GitHub's runners with HTTP 429 for 2+ hours at a stretch
+        # (rarebit-one/rarebit-sre#483, 2026-10-20), long enough that the
+        # backoff below ran out too; the mirror answered throughout.
+        # <rel> is the path under /maven2/.
+        MIRRORS=(
+          "https://repo1.maven.org/maven2"
+          "https://maven-central.storage-download.googleapis.com/maven2"
+        )
+        UA="setup-postgres (github-actions composite; https://github.com/rarebit-one/.github)"
+
+        # Each attempt tries every mirror in turn; between attempts, exponential
+        # backoff (5s→120s, 8 attempts, ~6.5 min in all). Any curl failure is
+        # retried, not only 429: transient 5xx and CDN resets look the same.
+        fetch() {  # fetch <rel-path> <dest> <max-time>
+          local rel="$1" dest="$2" max_time="$3" attempt=1 delay=5 rc=0 base
+          while :; do
+            for base in "${MIRRORS[@]}"; do
+              if curl -fsSL -A "$UA" --max-time "$max_time" -o "$dest" "$base/$rel"; then
+                [ "$base" = "${MIRRORS[0]}" ] || echo "fetched from mirror: $base/$rel"
+                return 0
+              fi
+              rc=$?
+              echo "download attempt $attempt via $base failed (curl rc=$rc): $rel"
+            done
+            if [ "$attempt" -ge 8 ]; then
+              echo "::error::download failed after $attempt attempts on every mirror: $rel"; return "$rc"
+            fi
+            echo "retrying in ${delay}s"
+            sleep "$delay"
+            attempt=$((attempt + 1)); delay=$((delay * 2)); [ "$delay" -gt 120 ] && delay=120
+          done
+        }
+
+        ARTIFACT="io/zonky/test/postgres/embedded-postgres-binaries-$classifier"
+
+        # ── 1. Serve from cache when it holds a verified jar for this input ──
+        resolved=""
+        if [ -s "$CACHE/resolved" ] && [ -s "$CACHE/jar.sha1" ]; then
+          cached_version="$(tr -d '[:space:]' < "$CACHE/resolved")"
+          cached_jar="$CACHE/embedded-postgres-binaries-$classifier-$cached_version.jar"
+          if [ -s "$cached_jar" ] && \
+             [ "$(tr -d '[:space:]' < "$CACHE/jar.sha1")" = "$(sha1sum "$cached_jar" | awk '{print $1}')" ]; then
+            resolved="$cached_version"
+            echo "cache hit: postgres $resolved ($classifier), sha1 verified"
+          else
+            echo "cache entry present but unusable; re-downloading"
+            rm -f "$CACHE"/*
+          fi
+        fi
+
+        # ── 2. Otherwise resolve newest patch of the major (or exact X.Y.Z) ─
+        if [ -z "$resolved" ]; then
+          if printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            resolved="$VERSION"
+          else
+            echo "resolving newest $VERSION.x from Maven Central metadata…"
+            fetch "$ARTIFACT/maven-metadata.xml" "$WORK/maven-metadata.xml" 60
+            resolved="$(grep -oE "<version>${VERSION}\.[0-9]+\.[0-9]+</version>" "$WORK/maven-metadata.xml" \
+              | sed -E 's/<[^>]+>//g' | sort -V | tail -1)"
+          fi
+          if [ -z "${resolved:-}" ]; then
+            echo "::error::could not resolve a postgres version for major '$VERSION' ($classifier)"; exit 1
+          fi
+          echo "postgres version: $resolved"
+
+          # ── 3. Download the zonky jar + verify its published SHA-1 ────────
+          JAR="embedded-postgres-binaries-$classifier-$resolved.jar"
+          echo "downloading $ARTIFACT/$resolved/$JAR"
+          fetch "$ARTIFACT/$resolved/$JAR" "$CACHE/$JAR" 300
+          fetch "$ARTIFACT/$resolved/$JAR.sha1" "$CACHE/jar.sha1" 60
+          expected="$(tr -d '[:space:]' < "$CACHE/jar.sha1")"
+          actual="$(sha1sum "$CACHE/$JAR" | awk '{print $1}')"
+          if [ "$expected" != "$actual" ]; then
+            rm -f "$CACHE"/*
+            echo "::error::SHA-1 mismatch for $JAR (expected $expected, got $actual)"; exit 1
+          fi
+          echo "sha1 verified: $actual"
+          printf '%s\n' "$resolved" > "$CACHE/resolved"
+        fi
+        JAR="embedded-postgres-binaries-$classifier-$resolved.jar"
+        cp "$CACHE/$JAR" "$WORK/$JAR"
+
+        # ── 4. Extract: jar → inner .txz → relocatable postgres tree ────────
+        rm -rf "$PGROOT"; mkdir -p "$PGROOT"
+        unzip -o -q "$WORK/$JAR" '*.txz' -d "$WORK"
+        txz="$(ls "$WORK"/*.txz | head -1)"
+        tar -xf "$txz" -C "$PGROOT"       # GNU tar shells out to xz for .txz
+        test -x "$PGROOT/bin/initdb" && test -x "$PGROOT/bin/pg_ctl" && test -x "$PGROOT/bin/postgres"
+        export LD_LIBRARY_PATH="$PGROOT/lib:${LD_LIBRARY_PATH:-}"
+        echo "postgres server version: $("$PGROOT/bin/postgres" --version)"
+
+        # ── 5. initdb a throwaway cluster (trust auth, fixed superuser) ─────
+        rm -rf "$PGDATA"; mkdir -p "$PGDATA"
+        "$PGROOT/bin/initdb" -D "$PGDATA" \
+          --username="$USERNAME" --auth=trust --auth-host=trust --auth-local=trust \
+          --encoding=UTF8 --no-locale >/dev/null
+        echo "initdb complete (superuser=$USERNAME)"
+
+        # ── 6. Create the requested database up front if not the default ────
+        #    zonky ships no psql/createdb → use the single-user backend.
+        if [ "$DATABASE" != "postgres" ] && [ "$DATABASE" != "$USERNAME" ]; then
+          echo "CREATE DATABASE \"$DATABASE\";" \
+            | "$PGROOT/bin/postgres" --single -D "$PGDATA" postgres >/dev/null
+          echo "created database $DATABASE"
+        fi
+
+        # ── 7. Start on $PORT (TCP 127.0.0.1) and wait for ready ────────────
+        "$PGROOT/bin/pg_ctl" -D "$PGDATA" -l "$LOGFILE" -w -t 60 \
+          -o "-p $PORT -c listen_addresses=127.0.0.1 -c unix_socket_directories=$WORK" \
+          start
+        for i in $(seq 1 30); do
+          if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then exec 3>&- 3<&-; break; fi
+          sleep 1
+        done
+        "$PGROOT/bin/pg_ctl" -D "$PGDATA" status
+        echo "postgres is accepting TCP connections on 127.0.0.1:$PORT"
+
+        # ── 8. Export connection env + action output ────────────────────────
+        DATABASE_URL="postgresql://$USERNAME@127.0.0.1:$PORT/$DATABASE"
+        {
+          echo "DATABASE_URL=$DATABASE_URL"
+          echo "PGHOST=127.0.0.1"
+          echo "PGPORT=$PORT"
+          echo "PGUSER=$USERNAME"
+          echo "PGDATABASE=$DATABASE"
+        } >> "$GITHUB_ENV"
+        echo "database-url=$DATABASE_URL" >> "$GITHUB_OUTPUT"
+        echo "DATABASE_URL=$DATABASE_URL"
