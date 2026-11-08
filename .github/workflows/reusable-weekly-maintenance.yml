@@ -220,7 +220,7 @@ jobs:
 
       - name: Set up Ruby
         if: ${{ inputs.stack == 'rails' || inputs.stack == 'ruby-gem' }}
-        uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
+        uses: ruby/setup-ruby@de492cf36cbab201753d720ce4f4e336cd688c94 # v1.336.0
         with:
           ruby-version: ${{ inputs.ruby-version != '' && inputs.ruby-version || '' }}
           ruby-version-file: ${{ inputs.ruby-version == '' && inputs.ruby-version-file || '' }}
@@ -239,7 +239,7 @@ jobs:
 
       - name: Set up JDK
         if: ${{ inputs.stack == 'kmp' }}
-        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: 'zulu'
           java-version: ${{ inputs.jdk-version }}
@@ -577,7 +577,7 @@ jobs:
 
       - name: Weekly maintenance
         id: maintenance
-        uses: anthropics/claude-code-action@d70510b174a1244958df0b03166a54912811f3e6 # v1.0.264
+        uses: anthropics/claude-code-action@c0949c50a78c1ec8ce2647db36629b870e715d0c # v1.0.268
         timeout-minutes: ${{ inputs.claude-timeout-minutes }}
         with:
           claude_code_oauth_token: ${{ secrets.claude-code-oauth-token }}
