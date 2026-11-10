@@ -744,7 +744,7 @@ Each third-party dependency gets one verdict:
 
 | Verdict | Licences |
 |---|---|
-| allow | MIT, ISC, BSD-2/3-Clause, 0BSD, Apache-2.0, BlueOak-1.0.0, Unlicense, CC0-1.0, Python-2.0/PSF-2.0, Ruby, Zlib, MPL-2.0, OFL-1.1, CC-BY-4.0 (data only), Google SDK terms in use |
+| allow | MIT, MIT-0, ISC, BSD-2/3-Clause, 0BSD, Apache-2.0, BlueOak-1.0.0, Unlicense, CC0-1.0, Python-2.0/PSF-2.0, Ruby, Zlib, MPL-2.0, OFL-1.1, CC-BY-4.0 (data only), Google SDK terms in use |
 | review (warn) | GPL/LGPL of any version, EPL, no detectable licence, anything not on the allow list |
 | block | AGPL, SSPL, BUSL, Commons Clause, Elastic, PolyForm, FSL and other source-available or noncommercial licences |
 

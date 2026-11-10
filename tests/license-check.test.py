@@ -47,6 +47,7 @@ class Policy(unittest.TestCase):
 
     def test_expressions(self):
         self.assertEqual(self.verdict("MIT"), "allow")
+        self.assertEqual(self.verdict("MIT-0"), "allow")
         self.assertEqual(self.verdict("(MPL-2.0 OR Apache-2.0)"), "allow")
         self.assertEqual(self.verdict("GPL-3.0 OR PROPRIETARY"), "warn")
         self.assertEqual(self.verdict("Apache-2.0 AND LGPL-3.0-or-later"), "warn")
