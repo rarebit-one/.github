@@ -732,6 +732,68 @@ jobs:
       claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 ```
 
+## `license-check.yml`
+
+Third-party licence check over the caller's lockfiles: `package-lock.json` /
+`npm-shrinkwrap.json`, `Gemfile.lock` and `go.mod`. It reads lockfiles and public
+registry metadata only (npm's recorded `license` field, rubygems.org for each exact
+gem version, deps.dev for Go modules). Nothing is installed or built, and it needs
+no paid GitHub feature (dependency-review needs Advanced Security on private repos).
+
+Each third-party dependency gets one verdict:
+
+| Verdict | Licences |
+|---|---|
+| allow | MIT, MIT-0, ISC, BSD-2/3-Clause, 0BSD, Apache-2.0, BlueOak-1.0.0, Unlicense, CC0-1.0, Python-2.0/PSF-2.0, Ruby, Zlib, MPL-2.0, OFL-1.1, CC-BY-4.0 (data only), Google SDK terms in use |
+| review (warn) | GPL/LGPL of any version, EPL, no detectable licence, anything not on the allow list |
+| block | AGPL, SSPL, BUSL, Commons Clause, Elastic, PolyForm, FSL and other source-available or noncommercial licences |
+
+An `OR` expression takes its best alternative; `AND` takes its worst. A gem's
+licence list is read as a choice (`["Ruby", "BSD-2-Clause"]`). Packages owned by
+the caller's org (`@<org>/*`, `github.com/<org>/*`, path and git gems) are listed
+as first-party and not judged. Yarn, pnpm, bun and Gradle are reported as not checked.
+
+### Inputs
+
+| Input | Default | Meaning |
+|---|---|---|
+| `mode` | `report` | `report` writes the job summary and never fails (the job is also `continue-on-error`); `enforce` fails when anything is blocked |
+| `path` | `.` | subdirectory of the caller to scan |
+| `tool_ref` | `main` | ref of this repo holding the checker; `license-check-self.yml` passes the PR head SHA |
+
+### Exceptions
+
+The org policy (`.github/scripts/license-policy.json`) records the org-wide
+exceptions, each with a reason: the Sentry CLI (`sentry`, `@sentry/cli`, FSL,
+internal use), Brakeman and bundler-audit (dev/CI tools), and a metadata correction
+for `postmark-rails`. A repo adds its own in `.github/license-policy.json`; an
+exception without a `reason` fails the run:
+
+```json
+{
+  "exceptions": [
+    {"ecosystem": "npm", "name": "@img/sharp-libvips-*", "reason": "build-time image optimisation; libvips is not shipped"}
+  ]
+}
+```
+
+### Example
+
+```yaml
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  license-check:
+    uses: rarebit-one/.github/.github/workflows/license-check.yml@main
+```
+
+Keep it non-blocking and out of required checks until the org decides to move a
+repo to `mode: enforce`.
+
 ## `reusable-track-do-deployment.yml`
 
 Tracks a DigitalOcean App Platform deployment to a terminal phase, verifies the

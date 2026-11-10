@@ -25,6 +25,7 @@ Then work inside `.worktrees/<name>/` for the rest of the session.
 - `.github/workflows/claude-agent.yml` — issue-triggered Claude PR agent
 - `.github/workflows/codeql-actions.yml` — CodeQL scanning for the Actions language
 - `.github/workflows/pin-check.yml` — reusable PR gate: fails on un-SHA-pinned third-party actions (zizmor + pinact)
+- `.github/workflows/license-check.yml` — reusable third-party licence check over the caller's lockfiles; report-only by default (never fails a PR). Checker and org policy: `.github/scripts/license-check.py`, `.github/scripts/license-policy.json`; tests: `tests/license-check.test.py`
 - `.github/workflows/pin-sweep.yml` — scheduled cross-repo self-healer: re-pins drift via `pinact run` and opens auto-merge PRs
 - `.github/workflows/pr.yml`, `pin-check-caller.yml`, `reusable-branch-promote.yml`, `sentry-release.yml` — callers/dispatchers
 - `.github/actions/setup-postgres/` — composite: root-free, docker-free PostgreSQL for CI (zonky relocatable build under `$RUNNER_TEMP`), so `services: postgres` jobs can move onto the jdb broker lane, where there is no docker. Mirrored from `luminalityai/.github`; `setup-postgres-smoke.yml` proves it on pg16/pg18 (hosted, free for this public repo).

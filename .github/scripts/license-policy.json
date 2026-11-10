@@ -1,0 +1,27 @@
+{
+  "description": "rarebit-one third-party licence policy. Patterns are case-insensitive globs over SPDX ids. Order of evaluation: block, warn, allow; anything unmatched is a review item. An OR expression takes its best alternative; AND takes its worst.",
+  "allow": [
+    "MIT", "MIT-0", "ISC", "BSD-2-Clause", "BSD-3-Clause", "0BSD", "Apache-2.0", "BlueOak-1.0.0", "Unlicense", "CC0-1.0",
+    "Python-2.0", "PSF-2.0", "Ruby", "Zlib", "MPL-2.0", "OFL-1.1",
+    "CC-BY-4.0",
+    "ML Kit Terms of Service", "Android Software Development Kit License"
+  ],
+  "allow_notes": {
+    "CC-BY-4.0": "Data only (for example caniuse-lite). Code under CC-BY-4.0 needs review.",
+    "ML Kit Terms of Service": "Google SDK terms already in use (audit LIC-09). Gradle has no lockfile yet, so this does not run today."
+  },
+  "warn": ["gpl-*", "lgpl-*", "epl-*"],
+  "block": [
+    "agpl-*", "sspl-*", "busl-*", "elastic-*", "polyform-*", "fsl-*", "*commons clause*",
+    "cc-by-nc*", "*noncommercial*", "*non-commercial*", "prosperity-*", "confluent-community-*",
+    "brakeman public use license"
+  ],
+  "exceptions": [
+    {"ecosystem": "npm", "name": "sentry", "reason": "Sentry CLI (FSL-1.1): pulled in by Sentry's bundler and Vite plugins for release and sourcemap upload; internal use, no Sentry-competing product (licence audit LIC-11)."},
+    {"ecosystem": "npm", "name": "@sentry/cli", "reason": "Sentry CLI (FSL-1.1): build-time release and sourcemap upload, internal use, no Sentry-competing product (licence audit LIC-11)."},
+    {"ecosystem": "rubygems", "name": "brakeman", "reason": "Dev/CI static analysis of our own code, which the Brakeman Public Use License permits; never shipped or offered to customers."},
+    {"ecosystem": "rubygems", "name": "bundler-audit", "reason": "Dev/CI tool (GPL-3.0), run against our own lockfiles; not distributed."},
+    {"ecosystem": "rubygems", "name": "postmark-rails", "licence": "MIT", "reason": "rubygems.org metadata lists no licence; the upstream repository LICENSE is MIT (verified in the 2026-11-10 licence audit)."}
+  ],
+  "first_party": ["one.rarebit.*"]
+}
