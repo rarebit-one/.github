@@ -17,7 +17,7 @@
     "brakeman public use license"
   ],
   "exceptions": [
-    {"ecosystem": "npm", "name": "sentry", "reason": "Sentry CLI (FSL-1.1): pulled in by @sentry/node's bundler plugins and used only for release/sourcemap upload; internal use, no Sentry-competing product (licence audit LIC-11)."},
+    {"ecosystem": "npm", "name": "sentry", "reason": "Sentry CLI (FSL-1.1): pulled in by Sentry's bundler and Vite plugins for release and sourcemap upload; internal use, no Sentry-competing product (licence audit LIC-11)."},
     {"ecosystem": "npm", "name": "@sentry/cli", "reason": "Sentry CLI (FSL-1.1): build-time release and sourcemap upload, internal use, no Sentry-competing product (licence audit LIC-11)."},
     {"ecosystem": "rubygems", "name": "brakeman", "reason": "Dev/CI static analysis of our own code, which the Brakeman Public Use License permits; never shipped or offered to customers."},
     {"ecosystem": "rubygems", "name": "bundler-audit", "reason": "Dev/CI tool (GPL-3.0), run against our own lockfiles; not distributed."},
