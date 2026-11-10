@@ -31,3 +31,4 @@ jobs:
       - run: bash tests/maintainer-review-gate.test.sh
       # Pins pin-check's workflow-validity check (pin-check.yml).
       - run: bash tests/pin-check-workflow-validity.test.sh
+      - run: python3 tests/license-check.test.py

@@ -1,0 +1,71 @@
+name: license-check
+
+# Reusable third-party licence check over the caller's lockfiles
+# (package-lock.json, Gemfile.lock, go.mod). Policy: .github/scripts/license-policy.json
+# here, plus an optional .github/license-policy.json in the caller for its own
+# exceptions (each needs a reason). Reads lockfiles and public registry metadata
+# (rubygems.org, deps.dev) only; installs and builds nothing; needs no paid feature.
+#
+# Ships NON-BLOCKING: in the default `report` mode the job is continue-on-error and
+# the script exits 0, so it never turns a PR red. Do not make it a required check
+# until the org decides to switch a repo to `enforce`.
+#
+# Consume from a repo:
+#
+#   on:
+#     pull_request:
+#     push:
+#       branches: [main]
+#   permissions:
+#     contents: read
+#   jobs:
+#     license-check:
+#       uses: rarebit-one/.github/.github/workflows/license-check.yml@main
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "report (summary only, never fails) or enforce (fail when a licence is blocked)"
+        type: string
+        default: report
+      path:
+        description: "subdirectory of the caller to scan (default: the whole repo)"
+        type: string
+        default: "."
+      tool_ref:
+        description: "ref of rarebit-one/.github that holds the checker (tests pass a PR head SHA)"
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  license-check:
+    name: Licence check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: ${{ inputs.mode != 'enforce' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: src
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: rarebit-one/.github
+          ref: ${{ inputs.tool_ref }}
+          path: .license-check-tool
+          sparse-checkout: .github/scripts
+      - name: Check licences
+        env:
+          MODE: ${{ inputs.mode }}
+          SCAN_PATH: ${{ inputs.path }}
+        run: |
+          python3 .license-check-tool/.github/scripts/license-check.py \
+            --root "src/${SCAN_PATH}" \
+            --extra-policy "src/.github/license-policy.json" \
+            --mode "${MODE}" \
+            --summary "${GITHUB_STEP_SUMMARY}"
