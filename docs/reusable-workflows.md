@@ -986,6 +986,25 @@ reach ACTIVE" would let that exit green. Unarmed, the same situation is the
 intended inert behaviour. The step summary's arming row reports what *happened*,
 never what was requested, for the same reason.
 
+### The spec write, and its drift check
+
+The promote (`.github/actions/do-app-deploy`) never round-trips the spec
+through a CLI. It reads `GET /v2/apps/{id}` as raw JSON, changes only the
+selected components' image source (`patch-spec.jq`), and `PUT`s
+`{"spec": …}` back. An old doctl once dropped every field it did not know
+(`liveness_health_check`, `maintenance`, ingress `match.authority`, …) on the
+`spec get` → `apps update` round trip (fundbright/delivery-ops#1019); a raw
+JSON write cannot.
+
+After the `PUT`, the spec DO returns is compared with the fetched spec plus the
+patch (`spec-drift.jq`). Any other missing, added or changed path fails the run
+with phase `SPEC_DRIFT` and lists the paths (never values). The write has
+already happened at that point, so the log says which deployment is rolling out
+and where to restore from. The only normalisation is "explicit null equals
+absent"; anything else DO turns out to rewrite gets added there with evidence.
+`tests/do-app-deploy-spec.test.sh` pins both programs. doctl remains only for
+read-only deployment polling, behind the version guard.
+
 ### Rollback
 
 ```bash

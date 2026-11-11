@@ -7,11 +7,22 @@ description: >-
   Mirrored verbatim into fundbright/.github for fundbright-web (separate org);
   update both copies together.
 
+  THE SPEC WRITE IS CLIENT-INDEPENDENT. The live spec is read and written over
+  the DigitalOcean REST API as raw JSON (GET /v2/apps/{id} -> patch the image
+  source with jq -> PUT /v2/apps/{id}), never through a CLI's spec model. An
+  old doctl once dropped every spec field it did not know on that round trip
+  (fundbright/delivery-ops#1019). After the PUT, the spec DO returns is compared
+  with the fetched spec plus the intended patch, and ANY other difference fails
+  the deploy with phase SPEC_DRIFT and the list of differing paths.
+
   PREREQUISITES (the caller must do these before invoking this action):
-    - `doctl` is installed and authenticated (`doctl auth init --access-token …`).
-      doctl persists auth under $HOME for the rest of the job, so this action's
-      doctl calls inherit it.
-    - `yq` (mikefarah) and `jq` are on PATH — both preinstalled on ubuntu-latest.
+    - Pass the DO token as `do_token` (or export DIGITALOCEAN_ACCESS_TOKEN on
+      the calling step or job). The spec read and write use it directly.
+    - `doctl` is installed and authenticated (`doctl auth init --access-token …`),
+      for the READ-ONLY deployment polling only. doctl persists auth under $HOME
+      for the rest of the job, so this action's doctl calls inherit it. Keep the
+      caller's doctl version guard: polling still parses its output.
+    - `jq` (1.6+) and `curl` are on PATH — both preinstalled on ubuntu-latest.
 
   This action NEVER exits non-zero. EVERY failure path — pre-flight input
   validation, spec fetch, patch, apply, and poll — emits a `phase` sentinel +
@@ -29,6 +40,13 @@ inputs:
   app_id:
     description: DigitalOcean App Platform app ID (e.g. vars.DO_STAGING_APP_ID).
     required: true
+  do_token:
+    description: >-
+      DigitalOcean API token with app read + update on `app_id`, used for the
+      REST spec read and write. Falls back to $DIGITALOCEAN_ACCESS_TOKEN from
+      the environment; with neither set the action fails with INVALID_INPUT.
+    required: false
+    default: ""
   image_repo:
     description: DOCR repository name to pin every component to (e.g. nutripod-web).
     required: true
@@ -73,8 +91,10 @@ outputs:
       SUPERSEDED (DO terminal phases), TIMEOUT (polling deadline hit before a
       terminal phase), or a sentinel: INVALID_INPUT / SPEC_FETCH_FAILED /
       PATCH_FAILED / NO_COMPONENTS / MISSING_COMPONENTS (pre-deploy) or
-      UPDATE_FAILED / PARSE_FAILED
-      / NO_DEPLOY_ID (apply).
+      UPDATE_FAILED / PARSE_FAILED / SPEC_DRIFT
+      / NO_DEPLOY_ID (apply). SPEC_DRIFT means the write WAS applied but the
+      spec DO now holds differs from the intended one outside the image patch;
+      the log lists the paths, and do_deploy_id is set when DO started one.
     value: ${{ steps.deploy.outputs.phase || steps.patch_spec.outputs.phase }}
   outcome:
     description: "'success' when phase == ACTIVE, otherwise 'failure'. Convenience for the caller's gate step."
@@ -91,6 +111,8 @@ runs:
         IMAGE_REPO: ${{ inputs.image_repo }}
         DEPLOY_SHA: ${{ inputs.deploy_sha }}
         COMPONENTS: ${{ inputs.components }}
+        DO_TOKEN: ${{ inputs.do_token }}
+        PATCH_JQ: ${{ github.action_path }}/patch-spec.jq
       run: |
         set -uo pipefail
         # Like the deploy step, this step NEVER exits non-zero: pre-flight and
@@ -108,12 +130,24 @@ runs:
         }
 
         # `required: true` only enforces presence, not non-emptiness — an empty
-        # `vars.DO_STAGING_APP_ID` would otherwise sail through to doctl/yq and
+        # `vars.DO_STAGING_APP_ID` would otherwise sail through to the API and
         # fail with an opaque message. Catch it up front with a clear sentinel.
         if [ -z "$APP_ID" ] || [ -z "$IMAGE_REPO" ] || [ -z "$DEPLOY_SHA" ]; then
           echo "::error::app_id, image_repo and deploy_sha must all be non-empty (got app_id='$APP_ID' image_repo='$IMAGE_REPO' deploy_sha='$DEPLOY_SHA')"
           fail "INVALID_INPUT"
         fi
+        DO_TOKEN="${DO_TOKEN:-${DIGITALOCEAN_ACCESS_TOKEN:-}}"
+        if [ -z "$DO_TOKEN" ]; then
+          echo "::error::no DigitalOcean token: pass the do_token input (or set DIGITALOCEAN_ACCESS_TOKEN). The spec is read and written over the REST API, not through doctl."
+          fail "INVALID_INPUT"
+        fi
+
+        # The spec carries env values (SECRET ones as EV[...] ciphertext), so
+        # every copy lives in a private dir and is never printed.
+        umask 077
+        WORK="${RUNNER_TEMP:-/tmp}/do-app-deploy"
+        mkdir -p "$WORK"
+        rm -f "$WORK"/app-before.json "$WORK"/spec-before.json "$WORK"/spec-patched.json
 
         # DO is the source of truth for the appspec — env vars, instance
         # sizes, alerts, etc. are managed in the DO UI. We only patch the
@@ -121,12 +155,21 @@ runs:
         # an `image:` block pinned to this commit's SHA. Restarts and
         # instance replacements then pull the same digest CI validated.
         #
-        # `(.services[], .workers[], .jobs[])` walks all three component
-        # arrays; missing keys yield no matches (yq is forgiving), and
-        # `|=` on no matches is a no-op. This keeps the patch correct
-        # even if the appspec later grows a worker or scheduled job.
-        if ! doctl apps spec get "$APP_ID" > /tmp/spec.yaml 2>/tmp/do-spec-stderr; then
-          echo "::error::doctl apps spec get failed for $APP_ID: $(cat /tmp/do-spec-stderr 2>/dev/null || echo 'stderr unavailable')"
+        # Read RAW over REST, not via `doctl apps spec get`: a client decodes
+        # the spec into its own model and re-encodes it, so any field it does
+        # not know is silently dropped, and the write-back then deletes it from
+        # the live app (fundbright/delivery-ops#1019). Raw JSON in, raw JSON out.
+        # The token goes to curl on stdin (-K -), never on argv.
+        CODE=$(printf 'header = "Authorization: Bearer %s"\n' "$DO_TOKEN" \
+          | curl -sS -K - --retry 3 --max-time 60 -o "$WORK/app-before.json" -w '%{http_code}' \
+              "https://api.digitalocean.com/v2/apps/${APP_ID}" 2>"$WORK/get.err") || true
+        if [ "${CODE:-000}" != "200" ]; then
+          echo "::error::GET /v2/apps/$APP_ID failed (HTTP ${CODE:-000}): $(jq -r '.message // empty' "$WORK/app-before.json" 2>/dev/null)$(cat "$WORK/get.err" 2>/dev/null)"
+          fail "SPEC_FETCH_FAILED"
+        fi
+        if ! jq -e '.app.spec | type == "object"' "$WORK/app-before.json" >/dev/null 2>&1 \
+           || ! jq '.app.spec' "$WORK/app-before.json" > "$WORK/spec-before.json"; then
+          echo "::error::GET /v2/apps/$APP_ID returned no .app.spec object"
           fail "SPEC_FETCH_FAILED"
         fi
 
@@ -144,12 +187,12 @@ runs:
           echo "::error::'components' is set but names no component (got '$COMPONENTS')"
           fail "INVALID_INPUT"
         fi
-        export NAMES_JSON
         # Handed to the deploy step, so the name list is parsed in one place.
         emit names_json "$NAMES_JSON"
         if [ "$NAMES_JSON" != "[]" ]; then
-          MISSING=$(yq -o=json '[.services[], .workers[], .jobs[]] | map(.name)' /tmp/spec.yaml 2>/dev/null \
-            | jq -r --argjson want "$NAMES_JSON" '($want - .) | join(",")' 2>/dev/null) || MISSING="(could not read component names)"
+          MISSING=$(jq -r --argjson want "$NAMES_JSON" \
+            '($want - [(.services // [])[], (.workers // [])[], (.jobs // [])[] | .name]) | join(",")' \
+            "$WORK/spec-before.json" 2>/dev/null) || MISSING="(could not read component names)"
           if [ -n "$MISSING" ]; then
             echo "::error::components named in the 'components' input are not in the live spec for $APP_ID: $MISSING"
             fail "MISSING_COMPONENTS"
@@ -157,34 +200,23 @@ runs:
           echo "Patching only the named components: $(echo "$NAMES_JSON" | jq -r 'join(", ")')"
         fi
 
-        # `mikefarah/yq` is preinstalled on ubuntu-latest. `strenv()` is
-        # the safe way to interpolate env vars into a yq expression;
-        # `env(NAMES_JSON)` parses the name list as an array. Names are
-        # matched EXACTLY (`map(select(. == $n))`): yq's `contains` on a string
-        # array matches substrings, so `["agent-service"] | contains(["agent"])`
-        # is true and would repoint a component called `agent` too.
-        if ! yq -i '
-          ((.services[], .workers[], .jobs[])
-            | select((env(NAMES_JSON) | length) == 0 or (.name as $n | env(NAMES_JSON) | map(select(. == $n)) | length > 0))
-          ) |= (
-            del(.dockerfile_path, .source_dir, .github) |
-            .image = {
-              "registry_type": "DOCR",
-              "repository": strenv(IMAGE_REPO),
-              "tag": strenv(DEPLOY_SHA)
-            }
-          )
-        ' /tmp/spec.yaml 2>/tmp/do-yq-stderr; then
-          echo "::error::yq patch failed: $(cat /tmp/do-yq-stderr 2>/dev/null || echo 'stderr unavailable')"
+        # The patch lives in patch-spec.jq (pinned by
+        # tests/do-app-deploy-spec.test.sh). It walks services, workers and
+        # jobs, leaves absent arrays absent, and matches names EXACTLY, so
+        # `agent` never repoints `agent-service`. Its output is the exact PUT
+        # body's spec, and the drift check's expected value.
+        if ! jq --argjson names "$NAMES_JSON" --arg repo "$IMAGE_REPO" --arg sha "$DEPLOY_SHA" \
+             -f "$PATCH_JQ" "$WORK/spec-before.json" > "$WORK/spec-patched.json" 2>"$WORK/patch.err"; then
+          echo "::error::jq patch failed: $(cat "$WORK/patch.err" 2>/dev/null || echo 'stderr unavailable')"
           fail "PATCH_FAILED"
         fi
 
         # A wrong app_id can resolve to a component-less app: the patch above
         # would then be a silent no-op and we'd deploy an unmodified spec.
         # Require at least one component to have been patched.
-        PATCHED=$(yq -r '[.services[], .workers[], .jobs[]]
-          | map(select((env(NAMES_JSON) | length) == 0 or (.name as $n | env(NAMES_JSON) | map(select(. == $n)) | length > 0)))
-          | length' /tmp/spec.yaml 2>/dev/null)
+        SELECT='[(.services // [])[], (.workers // [])[], (.jobs // [])[]]
+          | map(select(($names | length) == 0 or (.name as $n | any($names[]; . == $n))))'
+        PATCHED=$(jq -r --argjson names "$NAMES_JSON" "$SELECT | length" "$WORK/spec-patched.json" 2>/dev/null)
         [[ "$PATCHED" =~ ^[0-9]+$ ]] || PATCHED=0
         if [ "$PATCHED" -eq 0 ]; then
           echo "::error::appspec for $APP_ID has no services/workers/jobs to patch — wrong app_id?"
@@ -194,12 +226,9 @@ runs:
         # Verify every component now points at the expected DOCR repo + tag —
         # not just the tag, so a stale/partial image block (wrong repository,
         # or a non-DOCR registry_type) is also caught.
-        UNEXPECTED=$(yq -r '
-          [.services[], .workers[], .jobs[]]
-          | map(select((env(NAMES_JSON) | length) == 0 or (.name as $n | env(NAMES_JSON) | map(select(. == $n)) | length > 0)))
-          | map(select(.image.registry_type != "DOCR" or .image.repository != strenv(IMAGE_REPO) or .image.tag != strenv(DEPLOY_SHA)) | .name)
-          | join(",")
-        ' /tmp/spec.yaml)
+        UNEXPECTED=$(jq -r --argjson names "$NAMES_JSON" --arg repo "$IMAGE_REPO" --arg sha "$DEPLOY_SHA" "$SELECT
+          | map(select(.image.registry_type != \"DOCR\" or .image.repository != \$repo or .image.tag != \$sha) | .name)
+          | join(\",\")" "$WORK/spec-patched.json" 2>/dev/null) || UNEXPECTED="(could not verify the patched spec)"
         if [ -n "$UNEXPECTED" ]; then
           echo "::error::Components not patched to DOCR/$IMAGE_REPO:$DEPLOY_SHA: $UNEXPECTED"
           fail "PATCH_FAILED"
@@ -233,6 +262,9 @@ runs:
         DEPLOY_SHA: ${{ inputs.deploy_sha }}
         # The parsed `components` list from patch_spec (a JSON array; `[]` = all).
         NAMES_JSON: ${{ steps.patch_spec.outputs.names_json }}
+        # The REST write. patch_spec already proved one of these is non-empty.
+        DO_TOKEN: ${{ inputs.do_token }}
+        DRIFT_JQ: ${{ github.action_path }}/spec-drift.jq
       run: |
         set -uo pipefail
         # This step NEVER exits non-zero (see the action description): it
@@ -264,23 +296,44 @@ runs:
           fail "INVALID_INPUT"
         fi
 
+        DO_TOKEN="${DO_TOKEN:-${DIGITALOCEAN_ACCESS_TOKEN:-}}"
+        umask 077
+        WORK="${RUNNER_TEMP:-/tmp}/do-app-deploy"
+        # A job may run this action more than once (one promote per image with
+        # `components`): never let a previous run's files answer for this one.
+        rm -f "$WORK"/put-body.json "$WORK"/update.json* "$WORK"/app-after.json* \
+              "$WORK"/spec-after.json "$WORK"/drift.txt "$WORK"/drift.err
+        # Token on stdin (-K -), never argv. Prints the HTTP code ("000" when
+        # curl itself failed). GET retries; the PUT never does, since a blind
+        # retry could start a second deployment.
+        do_api() { # do_api <METHOD> <path> <outfile> [<json body file>]
+          local code body=()
+          [ -n "${4:-}" ] && body=(-H 'Content-Type: application/json' --data-binary "@$4")
+          [ "$1" = "GET" ] && body+=(--retry 3)
+          code=$(printf 'header = "Authorization: Bearer %s"\n' "$DO_TOKEN" \
+            | curl -sS -K - -X "$1" --max-time 120 "${body[@]}" -o "$3" -w '%{http_code}' \
+                "https://api.digitalocean.com/v2$2" 2>"$3.err") || true
+          echo "${code:-000}"
+        }
+
         # ─── Phase 1: kick off the deploy and CAPTURE THE ID ─────────
         #
-        # We deliberately do NOT use `doctl apps update --wait`. The
-        # `--wait` form blocks for the full deploy lifecycle, then we
-        # had to guess which deployment was ours from `apps get` —
-        # which on a failed deploy returns the rollback (DO promotes
-        # the rollback into `in_progress_deployment` immediately when
-        # our deploy fails, before doctl's `--wait` even returns).
+        # We deliberately do NOT block on the deploy inside the write (the
+        # old `doctl apps update --wait`). That form blocks for the full
+        # deploy lifecycle, then we had to guess which deployment was ours
+        # from `apps get` — which on a failed deploy returns the rollback
+        # (DO promotes the rollback into `in_progress_deployment`
+        # immediately when our deploy fails, before `--wait` even returns).
         #
-        # Instead: send the spec update without `--wait`. doctl's JSON
-        # response includes the freshly-created `in_progress_deployment`
-        # — that's OUR deployment, captured at the source. From here
-        # on, we hold the exact ID for the rest of the flow regardless
-        # of any rollback DO does in the background.
-        # Capture stderr separately — `doctl --output json` writes only
-        # JSON to stdout, but warnings (deprecations, retries) land on
-        # stderr. Mixing them would make jq trip over the JSON envelope.
+        # Instead: PUT the spec and return. The response carries the
+        # freshly-created `in_progress_deployment` — that's OUR deployment,
+        # captured at the source. From here on, we hold the exact ID for the
+        # rest of the flow regardless of any rollback DO does in the
+        # background.
+        #
+        # The write is a raw REST PUT of the JSON patch_spec produced, so no
+        # client's spec model sits between the fetched spec and the stored
+        # one (fundbright/delivery-ops#1019).
         # Anchor for the identity fallback below. MUST be read BEFORE the update
         # is sent: it is the lower bound that makes "created since our request"
         # meaningful, and a timestamp taken afterwards could exclude our own
@@ -291,27 +344,79 @@ runs:
           || date -u -v-1S +%Y-%m-%dT%H:%M:%SZ)
         echo "Update sent at (anchor for id resolution): $UPDATE_SENT_AT"
 
-        UPDATE_JSON=$(doctl apps update "$APP_ID" --spec /tmp/spec.yaml --output json 2>/tmp/do-update-stderr) || {
-          # In `--output json` mode doctl emits API errors as a JSON envelope
-          # on stdout (captured into $UPDATE_JSON) and leaves stderr empty —
-          # dump both so the failure surfaces the actual API message.
-          echo "::error::doctl apps update failed: $(cat /tmp/do-update-stderr 2>/dev/null || echo 'stderr unavailable')"
-          echo "::group::doctl apps update stdout"
-          printf '%s\n' "$UPDATE_JSON"
-          echo "::endgroup::"
+        if ! jq -n --slurpfile s "$WORK/spec-patched.json" '{spec: $s[0]}' > "$WORK/put-body.json" 2>/dev/null; then
+          echo "::error::could not build the PUT body from the patched spec"
           fail "UPDATE_FAILED"
-        }
-        if ! echo "$UPDATE_JSON" | jq empty 2>/dev/null; then
-          echo "::error::doctl apps update returned no parseable JSON"
-          cat /tmp/do-update-stderr 2>/dev/null || true
+        fi
+        CODE=$(do_api PUT "/apps/${APP_ID}" "$WORK/update.json" "$WORK/put-body.json")
+        case "$CODE" in
+          2??) ;;
+          *)
+            # DO's error envelope is {id, message, request_id}: no spec in it,
+            # so it is safe to print in full.
+            echo "::error::PUT /v2/apps/$APP_ID failed (HTTP $CODE): $(jq -r '.message // empty' "$WORK/update.json" 2>/dev/null)$(cat "$WORK/update.json.err" 2>/dev/null)"
+            echo "::group::PUT /v2/apps response"
+            jq -c '{id, message, request_id}' "$WORK/update.json" 2>/dev/null || true
+            echo "::endgroup::"
+            fail "UPDATE_FAILED"
+            ;;
+        esac
+        if ! jq -e '.app | type == "object"' "$WORK/update.json" >/dev/null 2>&1; then
+          echo "::error::PUT /v2/apps/$APP_ID returned no parseable app JSON"
+          cat "$WORK/update.json.err" 2>/dev/null || true
           fail "PARSE_FAILED"
         fi
+        UPDATE_JSON=$(cat "$WORK/update.json")
+
+        # ─── Drift check: DO must now hold EXACTLY what we wrote ─────
+        #
+        # Expected = the spec fetched before the write + the image patch,
+        # i.e. the PUT body. Actual = the spec in the PUT response (a fresh
+        # GET if the response lacks one). spec-drift.jq lists every path that
+        # differs — missing, added or changed — without printing values. Its
+        # header documents the single normalisation it applies (null == absent)
+        # and the measurement behind it. Pinned by
+        # tests/do-app-deploy-spec.test.sh, including the #1019 field set.
+        #
+        # A drift is reported AFTER the write by construction: the write has
+        # happened and DO may be rolling it out. That is still the point —
+        # the job goes red naming exactly what was lost, instead of green over
+        # a silently mangled app. Not auto-reverted: a second automated write
+        # on an app in an unexpected state is not safer than a human.
+        if ! jq -e '.app.spec | type == "object"' "$WORK/update.json" >/dev/null 2>&1 \
+           || ! jq '.app.spec' "$WORK/update.json" > "$WORK/spec-after.json" 2>/dev/null; then
+          echo "PUT response has no .app.spec; reading the spec back with a fresh GET."
+          CODE=$(do_api GET "/apps/${APP_ID}" "$WORK/app-after.json")
+          if [ "$CODE" != "200" ] || ! jq -e '.app.spec | type == "object"' "$WORK/app-after.json" >/dev/null 2>&1 \
+             || ! jq '.app.spec' "$WORK/app-after.json" > "$WORK/spec-after.json" 2>/dev/null; then
+            echo "SPEC_READBACK_FAILED (HTTP $CODE)" > "$WORK/drift.txt"
+          fi
+        fi
+        if [ ! -s "$WORK/drift.txt" ]; then
+          jq -n -r --slurpfile want "$WORK/spec-patched.json" --slurpfile got "$WORK/spec-after.json" \
+            -f "$DRIFT_JQ" > "$WORK/drift.txt" 2>"$WORK/drift.err" \
+            || echo "DRIFT_CHECK_ERROR $(cat "$WORK/drift.err" 2>/dev/null)" >> "$WORK/drift.txt"
+        fi
+        if [ -s "$WORK/drift.txt" ]; then
+          DRIFT_ID=$(jq -r '.app.in_progress_deployment.id // ""' "$WORK/update.json" 2>/dev/null || true)
+          echo "::error::SPEC DRIFT on app $APP_ID: after the write, the spec DigitalOcean holds differs from the fetched spec + image patch at $(wc -l < "$WORK/drift.txt" | tr -d ' ') path(s) OUTSIDE the intended change. Paths: $(paste -sd ';' "$WORK/drift.txt")"
+          echo "::group::Differing paths (KIND path; values deliberately not printed)"
+          cat "$WORK/drift.txt"
+          echo "::endgroup::"
+          echo "The write WAS applied${DRIFT_ID:+ and deployment $DRIFT_ID is rolling out}. Restore the listed settings from the previous deployment's spec (DO console → Activity, or GET /v2/apps/$APP_ID/deployments), then re-run."
+          emit phase "SPEC_DRIFT"
+          emit outcome "failure"
+          emit do_deploy_id "$DRIFT_ID"
+          emit do_deploy_url "${DRIFT_ID:+https://cloud.digitalocean.com/apps/${APP_ID}/deployments/${DRIFT_ID}}"
+          exit 0
+        fi
+        echo "Drift check passed: the spec DigitalOcean holds equals the fetched spec + image patch (no other path differs)."
 
         # USUALLY the deployment is created synchronously with the spec update
         # and its id is right here in the response. That is the happy path and
         # it stays the preferred source: the id is captured before DO can do
         # anything else, so no later state can shadow it.
-        DEPLOY_ID=$(echo "$UPDATE_JSON" | jq -r '.[0].in_progress_deployment.id // ""')
+        DEPLOY_ID=$(echo "$UPDATE_JSON" | jq -r '.app.in_progress_deployment.id // ""')
 
         # …but it is NOT guaranteed. MEASURED 2026-08-11 on fundbright-web
         # staging, on this composite's first real execution: `apps update`
@@ -347,7 +452,7 @@ runs:
         # also matched, ours was created first.
         printf '%s' "$NAMES_JSON" | jq -e 'type == "array"' >/dev/null 2>&1 || NAMES_JSON='[]'
         if [ -z "$DEPLOY_ID" ]; then
-          echo "::warning::apps update returned no in_progress_deployment.id — resolving the deployment by identity (see comment). This is a known DO race, not a failure."
+          echo "::warning::the spec PUT returned no in_progress_deployment.id — resolving the deployment by identity (see comment). This is a known DO race, not a failure."
           for attempt in 1 2 3 4 5 6; do
             sleep 5
             LIST_JSON=$(doctl apps list-deployments "$APP_ID" --output json 2>/dev/null) || LIST_JSON='[]'
@@ -378,7 +483,7 @@ runs:
         if [ -z "$DEPLOY_ID" ]; then
           echo "::error::Could not determine the deployment id: absent from the update response, and no deployment created since ${UPDATE_SENT_AT} is pinned to ${IMAGE_REPO}:${DEPLOY_SHA}."
           echo "The spec patch itself may still have applied — CHECK THE LIVE SPEC before assuming nothing happened."
-          echo "$UPDATE_JSON" | jq '.[0] | {id, phase: .phase, in_progress: .in_progress_deployment, active: .active_deployment}' 2>/dev/null || true
+          echo "$UPDATE_JSON" | jq '.app | {id, phase: .phase, in_progress: .in_progress_deployment, active: .active_deployment}' 2>/dev/null || true
           fail "NO_DEPLOY_ID"
         fi
         echo "Started deployment: $DEPLOY_ID"
