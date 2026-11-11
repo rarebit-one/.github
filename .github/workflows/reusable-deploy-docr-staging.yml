@@ -663,7 +663,7 @@ jobs:
         # fails with phase SPEC_DRIFT if DO then holds anything but the image
         # patch (fundbright/delivery-ops#1019). doctl is only read from now
         # (deployment polling), still behind the version guard above.
-        uses: rarebit-one/.github/.github/actions/do-app-deploy@b4c7cdef7dbb19fd78aee4713c764f55cbffdc81
+        uses: rarebit-one/.github/.github/actions/do-app-deploy@aa3cef30d431d4edc85ffdaf598abf82e00537d4
         with:
           app_id: ${{ secrets.DO_APP_ID }}
           do_token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
