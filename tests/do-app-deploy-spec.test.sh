@@ -69,6 +69,17 @@ jq 'del(.services[0].liveness_health_check)' "$TMP/want.json" > "$TMP/got.json"
 expect_drift "dropped liveness_health_check is reported" "$TMP/want.json" "$TMP/got.json" \
   "MISSING services[0=web].liveness_health_check"
 
+# ── 2b. DO filling in image.registry on a DOCR image we wrote without one is not drift ──
+jq '(.services[], .workers[]?) |= (if (.image | type) == "object" then .image |= ({registry_type: "DOCR"} + del(.registry)) else . end)' "$TMP/want.json" > "$TMP/want-docr.json"
+jq '(.services[], .workers[]?) |= (if (.image | type) == "object" then .image.registry = "fundbright" else . end)' "$TMP/want-docr.json" > "$TMP/got.json"
+expect_drift "DO filling in image.registry on a DOCR image is not drift" "$TMP/want-docr.json" "$TMP/got.json" ""
+
+# ── 2c. ...but a registry WE set, changed by DO, still is ──
+jq '(.services[0].image) |= ({registry_type: "DOCR", registry: "ours"} + del(.registry))' "$TMP/want.json" > "$TMP/want-reg.json"
+jq '.services[0].image.registry = "theirs"' "$TMP/want-reg.json" > "$TMP/got.json"
+expect_drift "a registry we set and DO changed is still drift" "$TMP/want-reg.json" "$TMP/got.json" \
+  "CHANGED services[0=web].image.registry"
+
 # ── 3. a dropped top-level maintenance fails ──────────────────────────────
 jq 'del(.maintenance)' "$TMP/want.json" > "$TMP/got.json"
 expect_drift "dropped top-level maintenance is reported" "$TMP/want.json" "$TMP/got.json" \

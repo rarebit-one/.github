@@ -29,6 +29,23 @@
 #
 # Pinned by tests/do-app-deploy-spec.test.sh.
 
+# DO legitimately fills in image.registry (the account's registry name) on a
+# DOCR image that we wrote without one; observed on fundbright-web staging,
+# 2026-11-11 (run 43032944278: ADDED services[...].image.registry). Remove it
+# from GOT only where WANT's image is DOCR and has no registry, so a registry
+# that WE set and DO then changed still counts as drift. Components are
+# matched by index, as DO keeps their order. sidekick-labs/.github's
+# do-app-deploy normalises the same field the same way.
+def drop_filled_docr_registry($want):
+  reduce (
+    ("services", "workers", "jobs", "static_sites", "functions") as $k
+    | ($want[$k] // [] | if type == "array" then to_entries[] else empty end)
+    | select((.value.image | type) == "object"
+             and .value.image.registry_type == "DOCR"
+             and (.value.image | has("registry") | not))
+    | [$k, .key, "image"]
+  ) as $img (.;
+    if (try getpath($img) catch null | type) == "object" then delpaths([$img + ["registry"]]) else . end);
 def norm: walk(if type == "object" then with_entries(select(.value != null)) else . end);
 
 # A leaf is a scalar or an empty container.
@@ -63,7 +80,7 @@ def pretty($doc):
   | .s;
 
 ($want[0] | norm) as $W
-| ($got[0] | norm) as $G
+| ($got[0] | norm | drop_filled_docr_registry($W)) as $G
 | ([$W | paths(leaf)] + [$G | paths(leaf)] | unique) as $all
 | [ $all[] as $p
     | present($W; $p) as $inW
