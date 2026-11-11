@@ -1,0 +1,62 @@
+{
+  "name": "example-web-staging",
+  "region": "sgp",
+  "disable_edge_cache": true,
+  "disable_email_obfuscation": true,
+  "maintenance": { "enabled": false, "archive": false },
+  "features": ["buildpack-stack=ubuntu-22"],
+  "alerts": [{ "rule": "DEPLOYMENT_FAILED" }, { "rule": "DOMAIN_FAILED" }],
+  "domains": [{ "domain": "staging.example.test", "type": "PRIMARY", "zone": "example.test" }],
+  "envs": [
+    { "key": "RAILS_ENV", "value": "staging", "scope": "RUN_AND_BUILD_TIME" },
+    { "key": "SECRET_KEY_BASE", "value": "EV[1:ZmFrZQ==:ZmFrZWNpcGhlcnRleHQ=]", "scope": "RUN_TIME", "type": "SECRET" }
+  ],
+  "ingress": {
+    "rules": [
+      { "component": { "name": "web" }, "match": { "authority": { "exact": "staging.example.test" }, "path": { "prefix": "/" } } }
+    ]
+  },
+  "services": [
+    {
+      "name": "web",
+      "image": { "registry_type": "DOCR", "repository": "example-web", "tag": "1111111111111111111111111111111111111111" },
+      "http_port": 3000,
+      "instance_count": 1,
+      "instance_size_slug": "apps-s-1vcpu-1gb",
+      "envs": [{ "key": "WEB_CONCURRENCY", "value": "2", "scope": "RUN_TIME" }],
+      "health_check": { "http_path": "/up", "initial_delay_seconds": 20, "period_seconds": 10 },
+      "liveness_health_check": { "http_path": "/up", "failure_threshold": 6, "period_seconds": 10, "timeout_seconds": 5 },
+      "alerts": [{ "rule": "CPU_UTILIZATION", "operator": "GREATER_THAN", "value": 80, "window": "FIVE_MINUTES" }]
+    },
+    {
+      "name": "agent-service",
+      "image": { "registry_type": "DOCR", "repository": "example-agent", "tag": "2222222222222222222222222222222222222222" },
+      "http_port": 8080,
+      "instance_count": 1,
+      "instance_size_slug": "apps-s-1vcpu-0.5gb",
+      "internal_ports": [8080]
+    }
+  ],
+  "workers": [
+    {
+      "name": "jobs",
+      "github": { "repo": "example/example-web", "branch": "main", "deploy_on_push": false },
+      "dockerfile_path": "Dockerfile",
+      "source_dir": "/",
+      "run_command": "bin/jobs",
+      "instance_count": 1,
+      "instance_size_slug": "apps-s-1vcpu-1gb"
+    }
+  ],
+  "jobs": [
+    {
+      "name": "release",
+      "kind": "PRE_DEPLOY",
+      "image": { "registry_type": "DOCR", "repository": "example-web", "tag": "1111111111111111111111111111111111111111", "digest": "sha256:aaaa" },
+      "run_command": "bin/rails db:prepare",
+      "instance_count": 1,
+      "instance_size_slug": "apps-s-1vcpu-1gb"
+    }
+  ],
+  "databases": [{ "name": "db", "engine": "PG", "production": true, "cluster_name": "example-pg" }]
+}

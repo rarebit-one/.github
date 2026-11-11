@@ -32,3 +32,6 @@ jobs:
       # Pins pin-check's workflow-validity check (pin-check.yml).
       - run: bash tests/pin-check-workflow-validity.test.sh
       - run: python3 tests/license-check.test.py
+      # Pins do-app-deploy's spec patch and post-write drift check
+      # (patch-spec.jq, spec-drift.jq), fundbright/delivery-ops#1019.
+      - run: bash tests/do-app-deploy-spec.test.sh
