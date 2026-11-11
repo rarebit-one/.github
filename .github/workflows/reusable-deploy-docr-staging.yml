@@ -508,10 +508,36 @@ jobs:
         uses: digitalocean/action-doctl@3cb3953159719656269e044e0e24ca16dd2a690f # v2.5.2
         with:
           token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          # Pinned. Without it the action asks GitHub's releases API for
+          # "latest" and, when that call errors, silently installs doctl 1.98.1
+          # (2023). That doctl drops every spec field it doesn't know on the
+          # spec get -> update round trip below (fundbright/delivery-ops#1019).
+          # Bump deliberately, together with DOCTL_MIN in the guard step.
+          version: 2.1.0
+
+      # The pin alone is not enough: if the pinned download fails, action-doctl
+      # still falls back to "recent releases" and then to 1.98.1. This step is
+      # deliberately NOT continue-on-error. The install above may soft-fail (a
+      # narrow token degrades to a no-op), but a doctl that installed at the
+      # wrong version must stop the job before anything reads or writes a spec.
+      - name: Guard doctl version
+        id: doctl_guard
+        if: ${{ steps.preflight.outputs.app_readable == 'true' && steps.doctl.outcome == 'success' }}
+        timeout-minutes: 2
+        env:
+          DOCTL_MIN: 2.1.0
+        run: |
+          set -uo pipefail
+          VER=$(doctl version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
+          if [ -z "$VER" ] || [ "$(printf '%s\n%s\n' "$DOCTL_MIN" "$VER" | sort -V | head -n1)" != "$DOCTL_MIN" ]; then
+            echo "::error::doctl ${VER:-unknown} installed; expected >= ${DOCTL_MIN} (action-doctl fallback?). Refusing to touch app specs."
+            exit 1
+          fi
+          echo "doctl ${VER} (>= ${DOCTL_MIN})"
 
       - name: Preview the spec patch
         id: preview
-        if: ${{ steps.preflight.outputs.app_readable == 'true' && steps.doctl.outcome == 'success' }}
+        if: ${{ steps.preflight.outputs.app_readable == 'true' && steps.doctl.outcome == 'success' && steps.doctl_guard.outcome == 'success' }}
         env:
           APP_ID: ${{ secrets.DO_APP_ID }}
           IMAGE_REPO: ${{ inputs.image_repo }}
