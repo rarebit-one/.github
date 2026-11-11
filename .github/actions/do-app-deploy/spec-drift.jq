@@ -27,6 +27,12 @@
 # real deploy ever shows DO rewriting something else, add it HERE, with the
 # evidence, rather than loosening the comparison.
 #
+# EXACT MODE: `--argjson exact true` turns the image.registry rule below off,
+# leaving only the null rule. That is for comparing two specs WE produced (an
+# operator's live spec vs the spec they intend to write: do-spec-edit.sh's
+# change listing), where an added registry is a requested change, not DO
+# filling one in. The default, used after every write, is unchanged.
+#
 # Pinned by tests/do-app-deploy-spec.test.sh.
 
 # DO legitimately fills in image.registry (the account's registry name) on a
@@ -80,7 +86,7 @@ def pretty($doc):
   | .s;
 
 ($want[0] | norm) as $W
-| ($got[0] | norm | drop_filled_docr_registry($W)) as $G
+| ($got[0] | norm | if ($ARGS.named.exact // false) then . else drop_filled_docr_registry($W) end) as $G
 | ([$W | paths(leaf)] + [$G | paths(leaf)] | unique) as $all
 | [ $all[] as $p
     | present($W; $p) as $inW

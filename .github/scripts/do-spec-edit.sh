@@ -92,6 +92,10 @@ api_msg() { jq -r '.message // empty' "$1" 2>/dev/null || true; }
 # drift WANT GOT -> "<KIND> <path>" lines. A jq failure must never read as
 # "no drift", so it exits non-zero and the caller stops.
 drift() { jq -n -r --slurpfile want "$1" --slurpfile got "$2" -f "$DRIFT_JQ"; }
+# requested FROM TO -> the paths an edit changes. Exact: the image.registry
+# rule is for what DO returns after a write, and here an added registry is a
+# change the operator asked for (rarebit-one/.github#185 review).
+requested() { jq -n -r --argjson exact true --slurpfile want "$1" --slurpfile got "$2" -f "$DRIFT_JQ"; }
 
 # 1. Read the live app, raw.
 code=$(do_api GET "/apps/$APP_ID" "$W/before.json")
@@ -111,7 +115,7 @@ fi
   || die "the filter must output exactly one spec object; nothing written"
 
 # 3. Show the change, as paths.
-changes=$(drift "$W/live.json" "$W/want.json") || die "could not compare the specs; nothing written"
+changes=$(requested "$W/live.json" "$W/want.json") || die "could not compare the specs; nothing written"
 if [[ -z "$changes" ]]; then
   echo "No change: the filter leaves the live spec of $NAME as it is. Nothing to write."
   exit 0

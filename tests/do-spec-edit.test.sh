@@ -140,6 +140,19 @@ STUB_PUT_NO_SPEC=1 run --name "$NAME" --apply "$APP" "$SET_FOO"
 if [[ $rc == 0 ]] && has "No drift"; then ok "no spec in the PUT response: read back with GET"
 else bad "no spec in the PUT response: read back with GET" "rc=$rc $out"; fi
 
+# ── 6b. setting image.registry on a DOCR image is a requested change ──────
+# spec-drift.jq forgives DO ADDING a registry after a write; the change listing
+# must not, or an operator's registry edit reads as "No change" and is dropped.
+DOCR_FIX="$TMP/docr-spec.json"
+jq '.services[0].image = {registry_type: "DOCR", repository: "web", tag: "abc"}' "$FIX" > "$DOCR_FIX"
+FIX_SAVED="$FIX"; FIX="$DOCR_FIX"
+run --name "$NAME" --apply "$APP" '.services[0].image.registry = "acme"'
+FIX="$FIX_SAVED"
+if [[ $rc == 0 ]] && has "ADDED services[0=web].image.registry" && [[ -e "$STUB/put-called" ]] \
+   && [[ "$(held '.services[0].image.registry')" == '"acme"' ]] && has "No drift"; then
+  ok "adding image.registry is listed and written, not read as no change"
+else bad "adding image.registry is listed and written, not read as no change" "rc=$rc $out"; fi
+
 # ── 7. a filter that changes nothing writes nothing ───────────────────────
 run --name "$NAME" --apply "$APP" '.'
 if [[ $rc == 0 ]] && has "No change" && [[ ! -e "$STUB/put-called" ]]; then
