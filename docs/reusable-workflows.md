@@ -1005,6 +1005,28 @@ absent"; anything else DO turns out to rewrite gets added there with evidence.
 `tests/do-app-deploy-spec.test.sh` pins both programs. doctl remains only for
 read-only deployment polling, behind the version guard.
 
+### Changing a live spec by hand
+
+Operators use the same path through `.github/scripts/do-spec-edit.sh`, run from
+a checkout of this repo, rather than `doctl apps spec get` → edit →
+`doctl apps update --spec`:
+
+```bash
+export DIGITALOCEAN_ACCESS_TOKEN=...   # from the vault; never on argv
+.github/scripts/do-spec-edit.sh --name <spec name> <app-id> '<jq filter>'          # dry run: lists changed paths
+.github/scripts/do-spec-edit.sh --name <spec name> --apply <app-id> '<jq filter>'  # write, then drift-check
+```
+
+The filter gets the raw `.app.spec` and outputs the whole new spec. `--name`
+must equal the live spec's `name`, so a wrong app id stops before anything is
+read into a write. Secret values go through the environment
+(`.value = env.NEW_KEY`), never in the filter text. After the `PUT` the script
+runs `spec-drift.jq` with one extra rule for edits: an env of type `SECRET`
+written with a plaintext value may come back as `EV[…]` ciphertext. Every other
+path, including every `EV[…]` value left alone, must come back unchanged, or
+the script fails with `SPEC DRIFT` and names the pre-write backup it kept.
+`tests/do-spec-edit.test.sh` pins it against a stub DO API.
+
 ### Rollback
 
 ```bash

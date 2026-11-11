@@ -35,3 +35,6 @@ jobs:
       # Pins do-app-deploy's spec patch and post-write drift check
       # (patch-spec.jq, spec-drift.jq), fundbright/delivery-ops#1019.
       - run: bash tests/do-app-deploy-spec.test.sh
+      # Pins the operator's live-spec edit (do-spec-edit.sh: GET -> jq -> PUT
+      # -> the same drift check) against a stub DO API.
+      - run: bash tests/do-spec-edit.test.sh
