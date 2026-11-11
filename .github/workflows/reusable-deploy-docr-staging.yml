@@ -510,8 +510,10 @@ jobs:
           token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
           # Pinned. Without it the action asks GitHub's releases API for
           # "latest" and, when that call errors, silently installs doctl 1.98.1
-          # (2023). That doctl drops every spec field it doesn't know on the
-          # spec get -> update round trip below (fundbright/delivery-ops#1019).
+          # (2023). That doctl dropped every spec field it didn't know on the
+          # old spec get -> update round trip (fundbright/delivery-ops#1019).
+          # The write is REST now; doctl still serves the preview read and
+          # do-app-deploy's deployment polling, so the pin and guard stay.
           # Bump deliberately, together with DOCTL_MIN in the guard step.
           version: 2.1.0
 
@@ -657,9 +659,14 @@ jobs:
         # resolves against the CALLER's checkout inside a reusable workflow.
         # This composite never exits non-zero — it reports via outputs, and the
         # gate step below is what fails the job.
-        uses: rarebit-one/.github/.github/actions/do-app-deploy@50b58fe8c31434b7f7c1504c74ca3fab9efd9fe5
+        # b4c7cde (#181): the spec read/write goes over REST as raw JSON and
+        # fails with phase SPEC_DRIFT if DO then holds anything but the image
+        # patch (fundbright/delivery-ops#1019). doctl is only read from now
+        # (deployment polling), still behind the version guard above.
+        uses: rarebit-one/.github/.github/actions/do-app-deploy@b4c7cdef7dbb19fd78aee4713c764f55cbffdc81
         with:
           app_id: ${{ secrets.DO_APP_ID }}
+          do_token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
           image_repo: ${{ inputs.image_repo }}
           deploy_sha: ${{ inputs.deploy_sha }}
           poll_timeout_seconds: ${{ inputs.poll_timeout_seconds }}
