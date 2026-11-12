@@ -109,6 +109,23 @@ else ok "drift output never contains values"; fi
 jq '.services[0].cpu_kind = null' "$TMP/want.json" > "$TMP/got.json"
 expect_drift "null-valued key reads as absent (documented normalisation)" "$TMP/want.json" "$TMP/got.json" ""
 
+# ── 6b. env type "GENERAL" equals no type: DO strips its own default ─────
+# Measured 2026-11-12 (nutripod-app-staging, POST /v2/apps/propose).
+jq '.services[0].envs[0].type = "GENERAL"' "$TMP/want.json" > "$TMP/want-general.json"
+expect_drift "env type GENERAL that DO stores without a type is not drift" "$TMP/want-general.json" "$TMP/want.json" ""
+out=$(jq -n -r --argjson exact true --slurpfile want "$TMP/want.json" --slurpfile got "$TMP/want-general.json" \
+        -f "$ACTION/spec-drift.jq" 2>&1 || echo "JQ_ERROR")
+if [ -z "$out" ]; then ok "...in exact mode too (spelling out the default is no change)"
+else bad "...in exact mode too (spelling out the default is no change)" "$out"; fi
+# ...but SECRET is not the default, so a dropped SECRET type still is drift,
+jq 'del(.envs[1].type)' "$TMP/want.json" > "$TMP/got.json"
+expect_drift "a dropped SECRET type is still drift" "$TMP/want.json" "$TMP/got.json" \
+  "MISSING envs[1=SECRET_KEY_BASE].type"
+# ...and only envs are touched: a non-env field named type is compared as is.
+jq '.services[0].image.type = "GENERAL"' "$TMP/want.json" > "$TMP/want-imgtype.json"
+expect_drift "a type GENERAL outside envs is still compared" "$TMP/want-imgtype.json" "$TMP/want.json" \
+  "MISSING services[0=web].image.type"
+
 # A reordered env list is NOT normalised: DO preserves order (measured).
 jq '.envs |= reverse' "$TMP/want.json" > "$TMP/got.json"
 if [ -n "$(drift "$TMP/want.json" "$TMP/got.json")" ]; then ok "reordered array is drift (no order normalisation)"

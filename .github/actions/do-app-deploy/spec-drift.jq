@@ -16,11 +16,18 @@
 # Array elements are labelled with their `name` (components) or `key` (envs) when
 # they have one, purely for readability; comparison is always by index.
 #
-# NORMALISATION: exactly one rule, and it is representational, not semantic.
+# NORMALISATION: two rules, both representational, not semantic.
 #   - An object key whose value is null is treated as absent. App Platform's API
 #     omits empty fields, and absent vs explicit null decode identically on its
 #     side, so this cannot hide a dropped setting: a dropped setting had a
 #     non-null value, and that value is still compared.
+#   - An env (an element of an `envs` array) with `type: "GENERAL"` is treated
+#     as having no type. GENERAL is DO's default, and DO stores it by omission:
+#     measured 2026-11-12 on nutripod-app-staging, POST /v2/apps/propose with an
+#     env {key, value, scope, type: "GENERAL"} returned it without `type`, and
+#     every GENERAL env in the live spec has none. Without this rule a correct
+#     write that spelled out GENERAL read as "MISSING ...envs[..].type". Any
+#     other type (SECRET) is still compared, and only env entries are touched.
 # Nothing else is normalised. Measured 2026-11-11: POST /v2/apps/propose (DO's
 # non-mutating validator) returned the live jumpdrive-broker spec with no path
 # differences at all, EV[...] secret ciphertexts and array order included. If a
@@ -28,7 +35,7 @@
 # evidence, rather than loosening the comparison.
 #
 # EXACT MODE: `--argjson exact true` turns the image.registry rule below off,
-# leaving only the null rule. That is for comparing two specs WE produced (an
+# leaving only the two normalisation rules above. That is for comparing two specs WE produced (an
 # operator's live spec vs the spec they intend to write: do-spec-edit.sh's
 # change listing), where an added registry is a requested change, not DO
 # filling one in. The default, used after every write, is unchanged.
@@ -53,6 +60,11 @@ def drop_filled_docr_registry($want):
   ) as $img (.;
     if (try getpath($img) catch null | type) == "object" then delpaths([$img + ["registry"]]) else . end);
 def norm: walk(if type == "object" then with_entries(select(.value != null)) else . end);
+# Drop `type: "GENERAL"` from env entries only (any element of an `envs` array).
+def drop_general_env_type:
+  reduce (paths(type == "object" and .type == "GENERAL")
+          | select(length >= 2 and .[-2] == "envs")) as $p
+    (.; delpaths([$p + ["type"]]));
 
 # A leaf is a scalar or an empty container.
 def leaf: if type == "object" or type == "array" then length == 0 else true end;
@@ -85,8 +97,8 @@ def pretty($doc):
       | .d = (.d | if type == "object" or type == "array" then (try .[$k] catch null) else null end))
   | .s;
 
-($want[0] | norm) as $W
-| ($got[0] | norm | if ($ARGS.named.exact // false) then . else drop_filled_docr_registry($W) end) as $G
+($want[0] | norm | drop_general_env_type) as $W
+| ($got[0] | norm | drop_general_env_type | if ($ARGS.named.exact // false) then . else drop_filled_docr_registry($W) end) as $G
 | ([$W | paths(leaf)] + [$G | paths(leaf)] | unique) as $all
 | [ $all[] as $p
     | present($W; $p) as $inW

@@ -135,6 +135,32 @@ if [[ $rc == 1 ]] && has "CHANGED envs[1=SECRET_KEY_BASE].value" ; then
   ok "an unchanged EV[...] secret that comes back different is drift"
 else bad "an unchanged EV[...] secret that comes back different is drift" "rc=$rc $out"; fi
 
+# ── 5b. DO strips an explicit env type "GENERAL" (its default): not drift ─
+# Measured 2026-11-12 on nutripod-app-staging: POST /v2/apps/propose with an env
+# {key, value, scope, type: "GENERAL"} returned it without .type, and the live
+# spec stores every GENERAL env without one. Before the fix the post-write check
+# reported "MISSING ...envs[..].type" as SPEC DRIFT after a correct write.
+DO_STRIPS_GENERAL='(.. | objects | select(has("envs")) | .envs[]?) |= (if .type == "GENERAL" then del(.type) else . end)'
+STUB_MUTATE="$DO_STRIPS_GENERAL" run --name "$NAME" --apply "$APP" \
+  '(.services[0].envs) += [{key: "FOO", value: "bar", scope: "RUN_TIME", type: "GENERAL"}]'
+if [[ $rc == 0 ]] && has "No drift" && [[ "$(held '.services[0].envs[-1] | has("type")')" == false ]]; then
+  ok "an env written as type GENERAL that DO stores without a type is not drift"
+else bad "an env written as type GENERAL that DO stores without a type is not drift" "rc=$rc $out"; fi
+
+# Turning a SECRET into a GENERAL env is still a change, and passes the check.
+STUB_MUTATE="$DO_STRIPS_GENERAL" run --name "$NAME" --apply "$APP" \
+  '(.envs[] | select(.key == "SECRET_KEY_BASE")) |= (.type = "GENERAL" | .value = "plain")'
+if [[ $rc == 0 ]] && has "MISSING envs[1=SECRET_KEY_BASE].type" && has "CHANGED envs[1=SECRET_KEY_BASE].value" \
+   && [[ -e "$STUB/put-called" ]] && has "No drift"; then
+  ok "SECRET -> GENERAL is listed as a change and passes the drift check"
+else bad "SECRET -> GENERAL is listed as a change and passes the drift check" "rc=$rc $out"; fi
+
+# Spelling out the default on an env that has no type changes nothing.
+run --name "$NAME" --apply "$APP" '(.envs[] | select(.key == "RAILS_ENV")).type = "GENERAL"'
+if [[ $rc == 0 ]] && has "No change" && [[ ! -e "$STUB/put-called" ]]; then
+  ok "setting type GENERAL on an env without a type is no change"
+else bad "setting type GENERAL on an env without a type is no change" "rc=$rc $out"; fi
+
 # ── 6. a PUT response without .app.spec is checked against a fresh GET ────
 STUB_PUT_NO_SPEC=1 run --name "$NAME" --apply "$APP" "$SET_FOO"
 if [[ $rc == 0 ]] && has "No drift"; then ok "no spec in the PUT response: read back with GET"
