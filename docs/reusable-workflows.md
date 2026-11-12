@@ -757,7 +757,7 @@ as first-party and not judged. Yarn, pnpm, bun and Gradle are reported as not ch
 
 | Input | Default | Meaning |
 |---|---|---|
-| `mode` | `report` | `report` writes the job summary and never fails (the job is also `continue-on-error`); `enforce` fails when anything is blocked |
+| `mode` | `enforce` | `enforce` (the default since 2026-11-25) fails when anything is blocked; review items never fail. `report` writes the job summary and never fails (the job is also `continue-on-error`) |
 | `path` | `.` | subdirectory of the caller to scan |
 | `tool_ref` | `main` | ref of this repo holding the checker; `license-check-self.yml` passes the PR head SHA |
 
@@ -791,8 +791,10 @@ jobs:
     uses: rarebit-one/.github/.github/workflows/license-check.yml@main
 ```
 
-Keep it non-blocking and out of required checks until the org decides to move a
-repo to `mode: enforce`.
+Blocking by default since 2026-11-25, after two report-only weeks with no blocked
+packages. It is still not a required check: adding it to a ruleset is the owner's
+decision. Before that, put each repo's `.github/license-policy.json` under
+CODEOWNERS, because a PR can edit its own exceptions.
 
 ## `reusable-track-do-deployment.yml`
 

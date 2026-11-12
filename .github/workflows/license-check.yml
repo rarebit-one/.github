@@ -6,9 +6,11 @@ name: license-check
 # exceptions (each needs a reason). Reads lockfiles and public registry metadata
 # (rubygems.org, deps.dev) only; installs and builds nothing; needs no paid feature.
 #
-# Ships NON-BLOCKING: in the default `report` mode the job is continue-on-error and
-# the script exits 0, so it never turns a PR red. Do not make it a required check
-# until the org decides to switch a repo to `enforce`.
+# BLOCKING since 2026-11-25: the default `enforce` mode fails the job when any
+# licence is blocked (warn and review items stay in the summary and never fail).
+# It shipped report-only on 2026-11-10 and was switched after two quiet weeks,
+# as the owner agreed on 2026-11-11. Pass `mode: report` for a non-blocking run.
+# It is still not a required check: that is a ruleset change, the owner's.
 #
 # Consume from a repo:
 #
@@ -26,9 +28,9 @@ on:
   workflow_call:
     inputs:
       mode:
-        description: "report (summary only, never fails) or enforce (fail when a licence is blocked)"
+        description: "enforce (fail when a licence is blocked; the default since 2026-11-25) or report (summary only, never fails)"
         type: string
-        default: report
+        default: enforce
       path:
         description: "subdirectory of the caller to scan (default: the whole repo)"
         type: string
