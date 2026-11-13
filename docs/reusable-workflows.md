@@ -183,6 +183,35 @@ job goes **red**: an arming may still be live, so disable it by hand with
 repo are unaffected. The default is `true`. Set to `false` on
 `jumpdrive-web` and `jumpdrive-runner`.
 
+### Holding npm runtime bumps for a human: `dependabot-hold-runtime` (jumpdrive-runner#248)
+
+The Dependabot path approves and arms every patch/minor bump once the required
+checks pass. On a repo where a merge deploys straight to production and CI never
+exercises runtime behaviour (jumpdrive-runner runs only an offline mock
+provider), that lands unreviewed runtime code in production. A caller can hold
+those bumps:
+
+```yaml
+    uses: rarebit-one/.github/.github/workflows/dependabot-auto-merge.yml@main
+    with:
+      dependabot-hold-runtime: true
+    secrets: inherit
+```
+
+With `true`, an npm (`npm_and_yarn`) Dependabot PR whose fetch-metadata
+`dependency-type` is `direct:production` is neither approved nor armed, and the
+decision summary records it as held. An auto-merge already armed on the PR (from
+a run before the caller opted in, or set by hand) is cleared, since an arming
+survives new pushes; if the clear cannot be confirmed the job goes red, as with
+`maintainer-auto-merge: false`. Re-arm by hand after reading the changelog. fetch-metadata reports the highest type
+across a group (production > development > indirect), so a group with any
+runtime member is held as a whole; an `unknown` or missing type holds too (fail
+closed). Dev-dependency, transitive (`indirect`), GitHub Actions and Docker bumps
+land as before. Split the npm group in the caller's `dependabot.yml` by
+`dependency-type` so dev bumps are not held for sharing a PR with runtime ones.
+The default is `false`; set on `jumpdrive-runner`. The decision function is
+pinned by `tests/dependabot-hold-runtime.test.sh`.
+
 ### The `anthropics/claude-code-action` exemption (org convention)
 
 We pin `anthropics/claude-code-action` to a **main-branch commit** (ahead of the

@@ -15,6 +15,8 @@ name: Auto-lander (Dependabot + autonomous engine + maintainer PRs)
 #      aggregate to semver-major. Because this org SHA-pins every action AND
 #      groups them, the strict gate skipped essentially every github_actions PR.
 #      These are vetted by the pin gate + CodeQL(Actions) + CI, so they land.
+#      Opt-in exception the other way: with `dependabot-hold-runtime: true`, an
+#      npm `direct:production` bump is held for a human (jumpdrive-runner#248).
 #   2. Autonomous SRE engine PRs — branches prefixed issue-worker/, ci-fix/, or
 #      sentry-autofix/, opened by the SRE engine workflows. These are already
 #      vetted by the engine's own guardrails before opening, so they get
@@ -160,6 +162,24 @@ on:
           REVIEW-VERDICT line) is designed and implemented.
         type: boolean
         default: true
+      dependabot-hold-runtime:
+        description: >-
+          Opt-in hold for npm RUNTIME bumps on the Dependabot path. Default
+          `false` leaves existing behaviour intact. When `true`, a Dependabot
+          PR whose ecosystem is npm and whose fetch-metadata `dependency-type`
+          is `direct:production` is NOT approved and auto-merge is NOT enabled
+          (an arming already on the PR is cleared, red if it cannot be): it
+          waits for a human to read the changelog and merge. fetch-metadata
+          reports the highest type across a group (production > development >
+          indirect), so a mixed group is held too, and an `unknown` type holds
+          (fail closed). Dev-dependency, transitive, GitHub Actions and Docker
+          bumps land exactly as before. Set on repos where a merge deploys to
+          production and CI cannot exercise runtime behaviour (e.g.
+          jumpdrive-runner, rarebit-one/jumpdrive-runner#248). Pair it with a
+          `dependabot.yml` group split by `dependency-type`, so a dev bump is
+          not held for sharing a PR with a runtime one.
+        type: boolean
+        default: false
 
 jobs:
   auto-merge:
@@ -372,6 +392,66 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Hold npm runtime bumps for a human (opt-in)
+        id: dependabot_hold
+        # Decides `hold`, which the enable step below reads. Off unless the
+        # caller passes `dependabot-hold-runtime: true` (jumpdrive-runner#248).
+        # On a hold it also clears any auto-merge already armed on the PR (from
+        # a run before the caller opted in, or set by hand: re-arm by hand after
+        # reading the changelog), because an arming survives new pushes and
+        # would land the PR on green anyway. Like `maintainer-auto-merge:
+        # false`, a clear it cannot confirm reds the job.
+        if: github.actor == 'dependabot[bot]'
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token || secrets.AUTOLAND_PAT || secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          HOLD_RUNTIME: ${{ inputs.dependabot-hold-runtime }}
+          ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+          DEP_TYPE: ${{ steps.metadata.outputs.dependency-type }}
+        run: |
+          set -euo pipefail
+          # dependabot_hold_decision: begin
+          # Prints "hold" or "land" for <hold-runtime> <ecosystem> <dependency-type>.
+          # Holds an npm update that is direct:production, or whose type is
+          # unknown/empty (fail closed): fetch-metadata reports the highest
+          # type across a group, so any runtime member holds the whole PR.
+          dependabot_hold_decision() {
+            if [ "$1" != "true" ] || [ "$2" != "npm_and_yarn" ]; then
+              echo land; return
+            fi
+            case "$3" in
+              direct:development|indirect) echo land ;;
+              *) echo hold ;;
+            esac
+          }
+          # dependabot_hold_decision: end
+          # Pinned by tests/dependabot-hold-runtime.test.sh.
+          decision=$(dependabot_hold_decision "$HOLD_RUNTIME" "$ECOSYSTEM" "$DEP_TYPE")
+          if [ "$decision" != hold ]; then
+            echo "hold=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "hold=true" >> "$GITHUB_OUTPUT"
+
+          armed=$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null' 2>/dev/null || echo unknown)
+          if [ "$armed" != "false" ]; then
+            gh pr merge --disable-auto "$PR_URL" >/dev/null 2>&1 || true
+            # read back a few times: a lagging read must not red a clear that worked
+            now=unknown
+            for _ in 1 2 3; do
+              sleep 3
+              now=$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null' 2>/dev/null || echo unknown)
+              [ "$now" = "false" ] && break
+            done
+            if [ "$now" != "false" ]; then
+              echo "::error::dependabot-hold-runtime is holding $PR_URL but its auto-merge could not be confirmed cleared (state: $now). It may still land on its own — disable it by hand: gh pr merge --disable-auto $PR_URL"
+              exit 1
+            fi
+            if [ "$armed" = "true" ]; then
+              echo "Auto-merge from an earlier arming was **disarmed** (runtime bump held)." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
       - name: Approve and enable auto-merge for patch/minor
         id: dependabot_enable
         # Patch/minor always land. Additionally, a GROUPED github_actions update
@@ -379,9 +459,12 @@ jobs:
         # SHA-pinned group members make that aggregate meaningless (it reads
         # semver-major even when every bump is a patch). Non-grouped updates and
         # every other ecosystem keep the strict gate, so a bundler/npm major
-        # still waits for a human.
+        # still waits for a human. An npm runtime bump held by the opt-in
+        # `dependabot-hold-runtime` input (step above) is neither approved nor
+        # enabled.
         if: >-
-          github.actor == 'dependabot[bot]' && (
+          github.actor == 'dependabot[bot]' &&
+          steps.dependabot_hold.outputs.hold != 'true' && (
           steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
           steps.metadata.outputs.update-type == 'version-update:semver-minor' || (
           steps.metadata.outputs.package-ecosystem == 'github_actions' &&
@@ -739,6 +822,8 @@ jobs:
           UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
           DEP_GROUP: ${{ steps.metadata.outputs.dependency-group }}
           ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+          DEP_TYPE: ${{ steps.metadata.outputs.dependency-type }}
+          RUNTIME_HOLD: ${{ steps.dependabot_hold.outputs.hold }}
           DEPENDABOT_OUTCOME: ${{ steps.dependabot_enable.outcome }}
           ENGINE_OUTCOME: ${{ steps.engine_enable.outcome }}
           MAINTAINER_OUTCOME: ${{ steps.maintainer_enable.outcome }}
@@ -759,6 +844,8 @@ jobs:
             echo "| ecosystem | ${ECOSYSTEM:-—} |"
             echo "| dependency-group | ${DEP_GROUP:-none (ungrouped)} |"
             echo "| update-type | ${UPDATE_TYPE:-—} |"
+            echo "| dependency-type | ${DEP_TYPE:-—} |"
+            echo "| runtime hold | ${RUNTIME_HOLD:-n/a} |"
             echo "| dependabot step | ${DEPENDABOT_OUTCOME} |"
             echo "| engine step | ${ENGINE_OUTCOME} |"
             echo "| maintainer step | ${MAINTAINER_OUTCOME} |"
@@ -782,6 +869,12 @@ jobs:
             echo "::notice::auto-lander: maintainer path disabled on this repo (maintainer-auto-merge: false, rarebit-sre#475) — this workflow did not arm $PR_URL."
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "⏸️ **Maintainer auto-merge is disabled for this repo** (\`maintainer-auto-merge: false\`, [rarebit-sre#475](https://github.com/rarebit-one/rarebit-sre/issues/475)). The review gate was skipped and this workflow did not arm auto-merge — read the review and merge by hand. (If the disarm step failed, it is red: an earlier arming may still be live.)" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$RUNTIME_HOLD" = "true" ]; then
+            # A FOURTH distinct outcome: configured, not a gap in the gate, so a
+            # notice rather than the "widen the gate" warning below.
+            echo "::notice::auto-lander: npm runtime bump held for a human (dependabot-hold-runtime, dependency-type ${DEP_TYPE:-unknown}) — this workflow did not approve or arm $PR_URL."
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "⏸️ **Runtime dependency bump held for a human** (\`dependabot-hold-runtime: true\`, dependency-type \`${DEP_TYPE:-unknown}\`). Read the changelogs and merge by hand." >> "$GITHUB_STEP_SUMMARY"
           elif [ "$REVIEW_VERDICT" = "failed" ] || [ "$REVIEW_VERDICT" = "unknown" ]; then
             echo "::warning::auto-lander held $PR_URL — review gate verdict '${REVIEW_VERDICT}': ${REVIEW_DETAIL}. Merge by hand once the review has concluded."
             echo "" >> "$GITHUB_STEP_SUMMARY"

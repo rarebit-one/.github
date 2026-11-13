@@ -29,6 +29,9 @@ jobs:
           persist-credentials: false
       # Pins classify_review_runs (dependabot-auto-merge.yml).
       - run: bash tests/maintainer-review-gate.test.sh
+      # Pins dependabot_hold_decision (dependabot-auto-merge.yml's opt-in
+      # runtime hold, jumpdrive-runner#248).
+      - run: bash tests/dependabot-hold-runtime.test.sh
       # Pins pin-check's workflow-validity check (pin-check.yml).
       - run: bash tests/pin-check-workflow-validity.test.sh
       - run: python3 tests/license-check.test.py
