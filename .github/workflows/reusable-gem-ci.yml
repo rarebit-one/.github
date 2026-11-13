@@ -70,6 +70,11 @@ on:
         required: false
         type: string
         default: ''
+      runner-label:
+        description: 'GitHub-hosted runner for the lint and test-matrix jobs (the ones that install Ruby). Public callers must stay on a GitHub-hosted label. Pin an image (e.g. ubuntu-24.04) when ubuntu-latest has no build of a Ruby the caller needs.'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
 
 permissions:
   contents: read
@@ -116,7 +121,7 @@ jobs:
           comment-summary-in-pr: on-failure
 
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner-label }}
     timeout-minutes: 10
     steps:
       - name: Checkout code
@@ -155,7 +160,7 @@ jobs:
 
   test-matrix:
     if: ${{ inputs.ruby-versions != '' && inputs.ruby-versions != '[]' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner-label }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
