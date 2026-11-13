@@ -2,7 +2,8 @@ name: license-check-self
 
 # Exercises the license-check reusable end to end on its own PRs: the workflow file
 # and checker from the PR head, scanning the test fixtures with live registry lookups.
-# Report mode, so the fixtures' deliberately blocked entries never turn the PR red.
+# Report mode, pinned explicitly since the reusable defaults to enforce, so the
+# fixtures' deliberately blocked entries never turn the PR red.
 
 on:
   pull_request:
@@ -21,5 +22,6 @@ jobs:
   license-check:
     uses: ./.github/workflows/license-check.yml
     with:
+      mode: report
       path: tests/fixtures/license-check
       tool_ref: ${{ github.event.pull_request.head.sha }}
