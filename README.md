@@ -22,3 +22,7 @@ sidekick-labs/octo-brain DEC-OCTO-0003 + DEC-OCTO-0004):
 - **Scheduling.** Posting beats fire **Mon–Fri** (morning, SGT); **SRE real-time monitors
   (health-sweep, sentry-sweep) fire daily, 7 days**. Non-posting infra is exempt.
 - **Review coverage.** Every repo carries `claude-code-review`.
+
+## Licence
+
+Copyright (c) 2026 Rarebit One. Licensed under the [MIT License](LICENSE). That covers the reusable workflows, composite actions and scripts here, which other repositories and organisations call.
