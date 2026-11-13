@@ -314,10 +314,11 @@ because the matrix is intentionally skipped.
 | `extra-lint-commands`| string  | no       | `""`                             | Multiline shell run after the primary lint command (brakeman, bundler-audit, etc.). |
 | `upload-screenshots` | boolean | no       | `false`                          | When true, upload `tmp/screenshots/` as `screenshots-<ruby>` on test failure. |
 | `concurrency-group`  | string  | no       | `""`                             | Override for the workflow concurrency group. Empty falls back to `<workflow>-<pr-or-ref>`. |
+| `runner-label`       | string  | no       | `ubuntu-latest`                  | Runner for `lint` and `test-matrix`, the jobs that install Ruby. Keep it GitHub-hosted for public callers. Pin an image such as `ubuntu-24.04` when `ubuntu-latest` has no build of a Ruby in the matrix: newer images carry only the latest patch of each series, so on ubuntu-26.04 `4.0.4` fails and only `4.0.9` installs. |
 
 ### Behavior
 
-- All jobs run on `ubuntu-latest`.
+- `lint` and `test-matrix` run on `runner-label` (default `ubuntu-latest`); `dependency-review` and the `test` aggregator always run on `ubuntu-latest`.
 - `actions/checkout@v6`, `ruby/setup-ruby@v1` (with `bundler-cache: true`),
   `actions/upload-artifact@v7`.
 - Test matrix has `fail-fast: false`.
