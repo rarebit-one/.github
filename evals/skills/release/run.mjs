@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// run.mjs — the /release skill eval: the COLLECT stage (rarebit-one/rarebit-sre#582).
+// run.mjs — the /release skill eval: the COLLECT stage.
 //
 // For each scenario × trial it builds a sandbox (world.mjs: a fake app's bare
 // origin with `main` and `production`, stub gh/curl/doctl/sentry-cli answering for

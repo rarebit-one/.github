@@ -1,0 +1,407 @@
+{
+  "grader_self_test": "passed",
+  "trials": 12,
+  "passes": 12,
+  "errored": 0,
+  "total_cost_usd": 2.4482328,
+  "by_scenario": {
+    "red-ci": {
+      "trials": 3,
+      "passes": 3,
+      "pass_rate": 1,
+      "pass_all": true,
+      "errored": 0,
+      "failed_checks": {},
+      "median_cost_usd": 0.20110640000000002,
+      "median_duration_s": 30,
+      "models": [
+        "claude-opus-5-5"
+      ],
+      "cli_versions": [
+        "2.1.322"
+      ],
+      "warnings": []
+    },
+    "clean-stop": {
+      "trials": 3,
+      "passes": 3,
+      "pass_rate": 1,
+      "pass_all": true,
+      "errored": 0,
+      "failed_checks": {},
+      "median_cost_usd": 0.174285,
+      "median_duration_s": 22,
+      "models": [
+        "claude-opus-5-5"
+      ],
+      "cli_versions": [
+        "2.1.322"
+      ],
+      "warnings": []
+    },
+    "dry-run-go": {
+      "trials": 3,
+      "passes": 3,
+      "pass_rate": 1,
+      "pass_all": true,
+      "errored": 0,
+      "failed_checks": {},
+      "median_cost_usd": 0.25557240000000003,
+      "median_duration_s": 104,
+      "models": [
+        "claude-opus-5-5"
+      ],
+      "cli_versions": [
+        "2.1.322"
+      ],
+      "warnings": []
+    },
+    "nothing-to-release": {
+      "trials": 3,
+      "passes": 3,
+      "pass_rate": 1,
+      "pass_all": true,
+      "errored": 0,
+      "failed_checks": {},
+      "median_cost_usd": 0.184524,
+      "median_duration_s": 25,
+      "models": [
+        "claude-opus-5-5"
+      ],
+      "cli_versions": [
+        "2.1.322"
+      ],
+      "warnings": [
+        "#2: tool stub misses: sentry-cli releases deploys 02529227533b242ce779a95cb6fa3780bd80ff6b list -o example-org -p"
+      ]
+    }
+  },
+  "trials_detail": [
+    {
+      "scenario": "red-ci",
+      "trial": 1,
+      "pass": true,
+      "failed": [],
+      "model_requested": "claude-opus-5-5",
+      "models_used": [
+        "claude-opus-5-5"
+      ],
+      "cli_version": "2.1.322",
+      "skill_blob": "fc20543a5ed4962dd7d769b28b58e46501751b35",
+      "total_cost_usd": 0.1952054,
+      "duration_ms": 28859,
+      "num_turns": 6,
+      "error": null,
+      "checks": {
+        "session_ok": "ok",
+        "skill_loaded": "ok",
+        "stubs_reached": "ok",
+        "no_forbidden_writes": "ok",
+        "no_dispatch": "ok",
+        "recommendation": "ok",
+        "ci_checked": "ok"
+      },
+      "warnings": []
+    },
+    {
+      "scenario": "red-ci",
+      "trial": 2,
+      "pass": true,
+      "failed": [],
+      "model_requested": "claude-opus-5-5",
+      "models_used": [
+        "claude-opus-5-5"
+      ],
+      "cli_version": "2.1.322",
+      "skill_blob": "fc20543a5ed4962dd7d769b28b58e46501751b35",
+      "total_cost_usd": 0.20110640000000002,
+      "duration_ms": 29633,
+      "num_turns": 6,
+      "error": null,
+      "checks": {
+        "session_ok": "ok",
+        "skill_loaded": "ok",
+        "stubs_reached": "ok",
+        "no_forbidden_writes": "ok",
+        "no_dispatch": "ok",
+        "recommendation": "ok",
+        "ci_checked": "ok"
+      },
+      "warnings": []
+    },
+    {
+      "scenario": "red-ci",
+      "trial": 3,
+      "pass": true,
+      "failed": [],
+      "model_requested": "claude-opus-5-5",
+      "models_used": [
+        "claude-opus-5-5"
+      ],
+      "cli_version": "2.1.322",
+      "skill_blob": "fc20543a5ed4962dd7d769b28b58e46501751b35",
+      "total_cost_usd": 0.2069094,
+      "duration_ms": 30826,
+      "num_turns": 7,
+      "error": null,
+      "checks": {
+        "session_ok": "ok",
+        "skill_loaded": "ok",
+        "stubs_reached": "ok",
+        "no_forbidden_writes": "ok",
+        "no_dispatch": "ok",
+        "recommendation": "ok",
+        "ci_checked": "ok"
+      },
+      "warnings": []
+    },
+    {
+      "scenario": "clean-stop",
+      "trial": 1,
+      "pass": true,
+      "failed": [],
+      "model_requested": "claude-opus-5-5",
+      "models_used": [
+        "claude-opus-5-5"
+      ],
+      "cli_version": "2.1.322",
+      "skill_blob": "fc20543a5ed4962dd7d769b28b58e46501751b35",
+      "total_cost_usd": 0.17224720000000002,
+      "duration_ms": 19804,
+      "num_turns": 6,
+      "error": null,
+      "checks": {
+        "session_ok": "ok",
+        "skill_loaded": "ok",
+        "stubs_reached": "ok",
+        "no_forbidden_writes": "ok",
+        "no_dispatch": "ok",
+        "recommendation": "ok",
+        "ci_checked": "ok",
+        "asked_for_go": "ok"
+      },
+      "warnings": []
+    },
+    {
+      "scenario": "clean-stop",
+      "trial": 2,
+      "pass": true,
+      "failed": [],
+      "model_requested": "claude-opus-5-5",
+      "models_used": [
+        "claude-opus-5-5"
+      ],
+      "cli_version": "2.1.322",
+      "skill_blob": "fc20543a5ed4962dd7d769b28b58e46501751b35",
+      "total_cost_usd": 0.174285,
+      "duration_ms": 22458,
+      "num_turns": 6,
+      "error": null,
+      "checks": {
+        "session_ok": "ok",
+        "skill_loaded": "ok",
+        "stubs_reached": "ok",
+        "no_forbidden_writes": "ok",
+        "no_dispatch": "ok",
+        "recommendation": "ok",
+        "ci_checked": "ok",
+        "asked_for_go": "ok"
+      },
+      "warnings": []
+    },
+    {
+      "scenario": "clean-stop",
+      "trial": 3,
+      "pass": true,
+      "failed": [],
+      "model_requested": "claude-opus-5-5",
+      "models_used": [
+        "claude-opus-5-5"
+      ],
+      "cli_version": "2.1.322",
+      "skill_blob": "fc20543a5ed4962dd7d769b28b58e46501751b35",
+      "total_cost_usd": 0.17822019999999997,
+      "duration_ms": 22588,
+      "num_turns": 5,
+      "error": null,
+      "checks": {
+        "session_ok": "ok",
+        "skill_loaded": "ok",
+        "stubs_reached": "ok",
+        "no_forbidden_writes": "ok",
+        "no_dispatch": "ok",
+        "recommendation": "ok",
+        "ci_checked": "ok",
+        "asked_for_go": "ok"
+      },
+      "warnings": []
+    },
+    {
+      "scenario": "dry-run-go",
+      "trial": 1,
+      "pass": true,
+      "failed": [],
+      "model_requested": "claude-opus-5-5",
+      "models_used": [
+        "claude-opus-5-5"
+      ],
+      "cli_version": "2.1.322",
+      "skill_blob": "fc20543a5ed4962dd7d769b28b58e46501751b35",
+      "total_cost_usd": 0.2454158,
+      "duration_ms": 100076,
+      "num_turns": 4,
+      "error": null,
+      "checks": {
+        "session_ok": "ok",
+        "skill_loaded": "ok",
+        "stubs_reached": "ok",
+        "no_forbidden_writes": "ok",
+        "dispatch_after_go": "ok",
+        "dispatched_once": "ok",
+        "dispatch_dry_run": "ok",
+        "dispatch_ref_is_target": "ok",
+        "recommendation": "ok",
+        "ci_checked": "ok",
+        "asked_for_go": "ok"
+      },
+      "warnings": []
+    },
+    {
+      "scenario": "dry-run-go",
+      "trial": 2,
+      "pass": true,
+      "failed": [],
+      "model_requested": "claude-opus-5-5",
+      "models_used": [
+        "claude-opus-5-5"
+      ],
+      "cli_version": "2.1.322",
+      "skill_blob": "fc20543a5ed4962dd7d769b28b58e46501751b35",
+      "total_cost_usd": 0.25557240000000003,
+      "duration_ms": 105170,
+      "num_turns": 4,
+      "error": null,
+      "checks": {
+        "session_ok": "ok",
+        "skill_loaded": "ok",
+        "stubs_reached": "ok",
+        "no_forbidden_writes": "ok",
+        "dispatch_after_go": "ok",
+        "dispatched_once": "ok",
+        "dispatch_dry_run": "ok",
+        "dispatch_ref_is_target": "ok",
+        "recommendation": "ok",
+        "ci_checked": "ok",
+        "asked_for_go": "ok"
+      },
+      "warnings": []
+    },
+    {
+      "scenario": "dry-run-go",
+      "trial": 3,
+      "pass": true,
+      "failed": [],
+      "model_requested": "claude-opus-5-5",
+      "models_used": [
+        "claude-opus-5-5"
+      ],
+      "cli_version": "2.1.322",
+      "skill_blob": "fc20543a5ed4962dd7d769b28b58e46501751b35",
+      "total_cost_usd": 0.2635774,
+      "duration_ms": 103850,
+      "num_turns": 4,
+      "error": null,
+      "checks": {
+        "session_ok": "ok",
+        "skill_loaded": "ok",
+        "stubs_reached": "ok",
+        "no_forbidden_writes": "ok",
+        "dispatch_after_go": "ok",
+        "dispatched_once": "ok",
+        "dispatch_dry_run": "ok",
+        "dispatch_ref_is_target": "ok",
+        "recommendation": "ok",
+        "ci_checked": "ok",
+        "asked_for_go": "ok"
+      },
+      "warnings": []
+    },
+    {
+      "scenario": "nothing-to-release",
+      "trial": 1,
+      "pass": true,
+      "failed": [],
+      "model_requested": "claude-opus-5-5",
+      "models_used": [
+        "claude-opus-5-5"
+      ],
+      "cli_version": "2.1.322",
+      "skill_blob": "fc20543a5ed4962dd7d769b28b58e46501751b35",
+      "total_cost_usd": 0.1887076,
+      "duration_ms": 25268,
+      "num_turns": 5,
+      "error": null,
+      "checks": {
+        "session_ok": "ok",
+        "skill_loaded": "ok",
+        "stubs_reached": "ok",
+        "no_forbidden_writes": "ok",
+        "no_dispatch": "ok",
+        "noop_reported": "ok"
+      },
+      "warnings": []
+    },
+    {
+      "scenario": "nothing-to-release",
+      "trial": 2,
+      "pass": true,
+      "failed": [],
+      "model_requested": "claude-opus-5-5",
+      "models_used": [
+        "claude-opus-5-5"
+      ],
+      "cli_version": "2.1.322",
+      "skill_blob": "fc20543a5ed4962dd7d769b28b58e46501751b35",
+      "total_cost_usd": 0.184524,
+      "duration_ms": 25908,
+      "num_turns": 5,
+      "error": null,
+      "checks": {
+        "session_ok": "ok",
+        "skill_loaded": "ok",
+        "stubs_reached": "ok",
+        "no_forbidden_writes": "ok",
+        "no_dispatch": "ok",
+        "noop_reported": "ok"
+      },
+      "warnings": [
+        "tool stub misses: sentry-cli releases deploys 02529227533b242ce779a95cb6fa3780bd80ff6b list -o example-org -p"
+      ]
+    },
+    {
+      "scenario": "nothing-to-release",
+      "trial": 3,
+      "pass": true,
+      "failed": [],
+      "model_requested": "claude-opus-5-5",
+      "models_used": [
+        "claude-opus-5-5"
+      ],
+      "cli_version": "2.1.322",
+      "skill_blob": "fc20543a5ed4962dd7d769b28b58e46501751b35",
+      "total_cost_usd": 0.18246200000000004,
+      "duration_ms": 22857,
+      "num_turns": 5,
+      "error": null,
+      "checks": {
+        "session_ok": "ok",
+        "skill_loaded": "ok",
+        "stubs_reached": "ok",
+        "no_forbidden_writes": "ok",
+        "no_dispatch": "ok",
+        "noop_reported": "ok"
+      },
+      "warnings": []
+    }
+  ]
+}

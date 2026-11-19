@@ -15,7 +15,7 @@
 //                         bare origin and every other github.com remote nowhere
 //   <sandbox>/gh-config/  an empty GH_CONFIG_DIR, so a real `gh` is unauthenticated
 //
-// Ported from sidekick-web .claude/evals/ship/run.mjs (sidekick-labs/octo-brain#679).
+// Ported from an earlier /ship eval in another org.
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";

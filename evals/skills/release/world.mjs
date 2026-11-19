@@ -2,8 +2,8 @@
 // GitHub, staging, production, DigitalOcean and Sentry report.
 //
 // The app is `example-org/harbor-web`, a stand-in for an estate app that ships
-// with the shared branch-promote workflow (like luminality-web: one production
-// branch). Its main history, built once per run into a bare seed repo:
+// with the shared branch-promote workflow (like the single-region consumer apps:
+// one production branch). Its main history, built once per run into a bare seed repo:
 //
 //   A  "Initial app"            ← `production` (scenarios 1–3), tag v<-8d>.1
 //   B  "Add order CSV export"
@@ -210,11 +210,11 @@ export function worldFor(scenario, { shas, bare, now = Date.now() }) {
       "sentry-cli": {
         rules: [
           { match: "^issues list\\b", out: "No issues found\n" },
-          { match: "^(releases info|deploys list)\\b", out: sentryDeploys },
+          { match: "^(releases info|deploys list|releases deploys)\\b", out: sentryDeploys },
           { match: "^(--version|-V)", out: "sentry-cli 2.58.2\n" },
           { match: "^info\\b", out: "Sentry Server: https://sentry.io\nDefault Organization: example-org\nDefault Project: harbor-web\n" },
         ],
-        default: { exit: 1, err: "error: this eval's sentry-cli stub only answers issues list, releases info and deploys list\n" },
+        default: { exit: 1, err: "error: this eval's sentry-cli stub only answers issues list, releases info, releases deploys and deploys list\n" },
       },
     },
     facts: { target: D, production, base: A, base_tag: baseTag, pending: scenario === "nothing-to-release" ? 0 : 3, ci_on_target: ciRed ? "failure" : "success" },

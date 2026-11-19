@@ -3,10 +3,9 @@
 Shared plumbing for evals of the estate's skills: each eval runs a skill headless
 (`claude -p`) in a throwaway sandbox where stub CLIs stand in for GitHub,
 production and the rest, then grades what the agent did from the stub call logs
-and the transcript, deterministically. It is ported from sidekick-web's `/ship`
-eval (`.claude/evals/ship/`, sidekick-labs/octo-brain#679) and kept skill-neutral
-so `/release` (here) and `/land` (later, from `rarebit-one/workspace-config`) share
-one implementation. Tracker: [rarebit-sre#582](https://github.com/rarebit-one/rarebit-sre/issues/582).
+and the transcript, deterministically. It is ported from an earlier `/ship` eval
+in another org and kept skill-neutral, so `/release` (here) and other skills' evals,
+including ones kept beside a skill in another repo, share one implementation.
 
 | file | role |
 |---|---|
@@ -87,7 +86,8 @@ A skill eval is a directory `evals/skills/<skill>/` with:
    misbehaving one must fail the check it targets.
 5. an entry in `.github/workflows/skill-eval.yml`'s `eval` choice and validation.
 
-**From another repo** (`/land` in `workspace-config`): check out
+**From another repo** (for a skill whose source, and so whose transcripts, must stay
+private): check out
 `rarebit-one/.github` at a pinned SHA (it is public) and import
 `<checkout>/evals/skills/runner/*.mjs` by absolute path. Nothing here resolves paths
 relative to this repo's root. Keep that skill's world, stubs and grader in its own
