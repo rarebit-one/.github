@@ -87,11 +87,13 @@ A skill eval is a directory `evals/skills/<skill>/` with:
    misbehaving one must fail the check it targets.
 5. an entry in `.github/workflows/skill-eval.yml`'s `eval` choice and validation.
 
-**From another repo** (`/land` in `workspace-config`): check out
-`rarebit-one/.github` at a pinned SHA (it is public) and import
-`<checkout>/evals/skills/runner/*.mjs` by absolute path. Nothing here resolves paths
-relative to this repo's root. Keep that skill's world, stubs and grader in its own
-repo next to the skill.
+**A skill that lives in another repo** (`/land`, in the private
+`workspace-config`): keep the eval here and read the skill at a pinned SHA. The
+live job checks it out read-only with a one-repo `contents: read` App token and
+passes `--skill <path> --skill-ref <sha>` (see `../land/README.md` for why). The
+alternative, the eval in the other repo importing this runner from a checkout of
+`rarebit-one/.github` at a pinned SHA, also works, because nothing here resolves
+paths relative to this repo's root.
 
 ## Model
 

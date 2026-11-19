@@ -39,6 +39,13 @@ name: Skill eval
 # evals/skills/<eval>/results/<date>-ci-<run id>.{runs.jsonl,json}. This workflow
 # has no write permission and never commits.
 #
+# Skills from other repos: /land lives in the private rarebit-one/workspace-config
+# (.agents/skills/land/SKILL.md). The eval job checks it out read-only at
+# `skill_ref` (default: the pinned SHA below) with a short-lived token from the
+# org's rarebit-one App, scoped to contents:read on that one repo. The token is
+# used only by that checkout step (persist-credentials: false) and never reaches
+# the agent, whose environment is an allow-list (evals/skills/runner/sandbox.mjs).
+#
 # Runner: GitHub-hosted ubuntu-latest, never a self-hosted label. The agent runs
 # arbitrary Bash, so it gets an ephemeral VM rather than a persistent runner.
 
@@ -55,15 +62,20 @@ on:
         type: choice
         options:
           - release
+          - land
         default: release
       scenarios:
-        description: 'Comma-separated scenarios (blank = all; release: red-ci,clean-stop,dry-run-go,nothing-to-release)'
+        description: 'Comma-separated scenarios (blank = all; release: red-ci,clean-stop,dry-run-go,nothing-to-release; land: red-check,blocked,draft,nothing-ran,green-merge,stacked-base)'
         required: false
         default: ''
       n:
         description: 'Trials per scenario'
         required: false
         default: '3'
+      skill_ref:
+        description: 'land only: rarebit-one/workspace-config commit to read the skill from (blank = the pinned LAND_SKILL_REF)'
+        required: false
+        default: ''
       model:
         description: "Model override (blank = the skill's own frontmatter model; /release: claude-opus-5-5)"
         required: false
@@ -124,6 +136,9 @@ jobs:
       CLAUDE_EFFORT: ${{ vars.CLAUDE_EFFORT || 'high' }}
       MODEL_OVERRIDE: ${{ inputs.model }}
       EVAL: ${{ inputs.eval }}
+      # rarebit-one/workspace-config at the last change to .agents/skills/land/SKILL.md
+      # (#33, 2026-11-04). Bump it deliberately when the skill changes.
+      LAND_SKILL_REF: ${{ inputs.skill_ref || 'cf4c7f69e309b960154bd502414e72f4453ce0ac' }}
       SCENARIOS: ${{ inputs.scenarios }}
       TRIALS: ${{ inputs.n }}
       MAX_TOTAL_USD: ${{ inputs.max_total_usd }}
@@ -138,11 +153,34 @@ jobs:
       - name: Validate inputs
         run: |
           set -euo pipefail
-          case "$EVAL" in release) ;; *) echo "::error::unknown eval '$EVAL'"; exit 1 ;; esac
+          case "$EVAL" in release|land) ;; *) echo "::error::unknown eval '$EVAL'"; exit 1 ;; esac
+          [[ "$LAND_SKILL_REF" =~ ^[0-9a-f]{40}$|^[A-Za-z0-9._/-]+$ ]] || { echo "::error::bad skill_ref"; exit 1; }
           [[ "$TRIALS" =~ ^[1-9][0-9]?$ ]] || { echo "::error::n must be 1-99"; exit 1; }
           [[ "$MAX_TOTAL_USD" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::max_total_usd must be a number"; exit 1; }
           [[ -z "$SCENARIOS" || "$SCENARIOS" =~ ^[a-z0-9,-]+$ ]] || { echo "::error::bad scenarios list"; exit 1; }
           [[ -z "$MODEL_OVERRIDE" || "$MODEL_OVERRIDE" =~ ^[A-Za-z0-9._/:\[\]-]+$ ]] || { echo "::error::bad model id"; exit 1; }
+
+      # land: the skill lives in workspace-config (private). Read-only, one repo, ~1h.
+      - name: Mint a workspace-config read token
+        if: inputs.eval == 'land'
+        id: wc-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: rarebit-one
+          repositories: workspace-config
+          permission-contents: read
+      - name: Check out the land skill (workspace-config, read-only)
+        if: inputs.eval == 'land'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: rarebit-one/workspace-config
+          ref: ${{ env.LAND_SKILL_REF }}
+          token: ${{ steps.wc-token.outputs.token }}
+          path: _skills/workspace-config
+          sparse-checkout: .agents/skills/land
+          persist-credentials: false
 
       - name: Install the pinned Claude Code CLI
         run: npm install -g "@anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}"
@@ -159,6 +197,10 @@ jobs:
                 --out "$RUNNER_TEMP/skill-eval-results/runs.jsonl")
           [ -n "$SCENARIOS" ] && args+=(--scenarios "$SCENARIOS")
           [ -n "$MODEL_OVERRIDE" ] && args+=(--model "$MODEL_OVERRIDE")
+          if [ "$EVAL" = land ]; then
+            args+=(--skill _skills/workspace-config/.agents/skills/land/SKILL.md
+                   --skill-ref "$(git -C _skills/workspace-config rev-parse HEAD)")
+          fi
           node "evals/skills/$EVAL/run.mjs" "${args[@]}"
 
       - name: Score
