@@ -1,0 +1,166 @@
+name: Skill eval
+
+# Evals for the estate's shared skills (evals/skills/, rarebit-one/rarebit-sre#582).
+# Each eval runs a skill headless (`claude -p`) in a throwaway sandbox: a stub
+# `gh` and stub health/DO/Sentry CLIs answer for the scenario, the app's origin is
+# a local bare repo, and nothing can reach GitHub or production. score.mjs grades
+# the transcript and stub call logs deterministically, behind a grader positive
+# control that voids the run if it fails. See evals/skills/runner/README.md.
+#
+# Two jobs, two triggers:
+#
+#   grader  pull_request on a skill, the evals or this file, plus every dispatch.
+#           Unit tests, the positive control, end-to-end runs with scripted fake
+#           agents, and a re-score of committed results. No Claude, no secrets.
+#
+#   eval    workflow_dispatch ONLY. The live sessions are deliberately not
+#           path- or PR-triggered:
+#           - A PR trigger would run PR-authored skill text and eval code with the
+#             org CLAUDE_CODE_OAUTH_TOKEN in an agent that has unrestricted Bash
+#             (bypassPermissions: nobody can approve a prompt in -p mode). The PR
+#             would decide what the agent is told to do with the token in its
+#             environment. claude-agent.yml hands the token to claude-code-action
+#             with a restricted tool list; a skill eval can't restrict Bash,
+#             because the skills under test need it.
+#           - Cost: the default /release run is 4 scenarios × N=3 sessions on the
+#             shared subscription seat, which also serves every other org agent.
+#           Dispatch it on the branch that changes the skill (Actions → Skill eval
+#           → Run workflow, pick the branch) before merging.
+#
+# Runner: GitHub-hosted ubuntu-latest, never a self-hosted label. The agent runs
+# arbitrary Bash, so it gets an ephemeral VM rather than a persistent runner.
+
+on:
+  pull_request:
+    paths:
+      - 'skills/**'
+      - 'evals/skills/**'
+      - '.github/workflows/skill-eval.yml'
+  workflow_dispatch:
+    inputs:
+      eval:
+        description: 'Which skill eval to run'
+        type: choice
+        options:
+          - release
+        default: release
+      scenarios:
+        description: 'Comma-separated scenarios (blank = all; release: red-ci,clean-stop,dry-run-go,nothing-to-release)'
+        required: false
+        default: ''
+      n:
+        description: 'Trials per scenario'
+        required: false
+        default: '3'
+      model:
+        description: 'Model (blank = vars.CLAUDE_MODEL, else claude-sonnet-5-5)'
+        required: false
+        default: ''
+      max_total_usd:
+        description: 'Stop starting trials once API-equivalent spend could pass this'
+        required: false
+        # sidekick-web's /ship eval measured ~US$0.45 per session; a /release
+        # session is shorter (no commit/CI loop), so 12 sessions should fit well
+        # under this. Each trial is also capped at --max-run-usd 3.
+        default: '10'
+
+permissions: {} # granted per job below
+
+concurrency:
+  group: skill-eval-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  grader:
+    name: Skill eval grader (positive control + unit tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Unit tests, positive control and fake-agent end-to-end runs
+        run: node --test --test-concurrency=1 'evals/skills/**/*.test.mjs'
+      - name: Re-score committed results (re-runs the control; INVALID on a broken grader)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in evals/skills/*/results/*.runs.jsonl; do
+            dir="$(dirname "$(dirname "$f")")"
+            echo "### $f" >> "$GITHUB_STEP_SUMMARY"
+            node "$dir/score.mjs" --runs "$f" --allow-errors --allow-fail >> "$GITHUB_STEP_SUMMARY"
+          done
+
+  eval:
+    name: Skill eval (live sessions)
+    if: github.event_name == 'workflow_dispatch'
+    needs: grader
+    runs-on: ubuntu-latest
+    # 12 sessions by default, run one at a time; this bounds a hang, not the run.
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      # Pinned so a CLI bump never silently moves results. Bump it deliberately and
+      # re-run the eval on the bump PR.
+      CLAUDE_CLI_VERSION: '2.1.322'
+      CLAUDE_EFFORT: ${{ vars.CLAUDE_EFFORT || 'high' }}
+      CLAUDE_MODEL: ${{ inputs.model || vars.CLAUDE_MODEL || 'claude-sonnet-5-5' }}
+      EVAL: ${{ inputs.eval }}
+      SCENARIOS: ${{ inputs.scenarios }}
+      TRIALS: ${{ inputs.n }}
+      MAX_TOTAL_USD: ${{ inputs.max_total_usd }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          case "$EVAL" in release) ;; *) echo "::error::unknown eval '$EVAL'"; exit 1 ;; esac
+          [[ "$TRIALS" =~ ^[1-9][0-9]?$ ]] || { echo "::error::n must be 1-99"; exit 1; }
+          [[ "$MAX_TOTAL_USD" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::max_total_usd must be a number"; exit 1; }
+          [[ -z "$SCENARIOS" || "$SCENARIOS" =~ ^[a-z0-9,-]+$ ]] || { echo "::error::bad scenarios list"; exit 1; }
+
+      - name: Install the pinned Claude Code CLI
+        run: npm install -g "@anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}"
+
+      - name: Run the eval
+        env:
+          # The org subscription credential, as claude-agent.yml uses it.
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          args=(--n "$TRIALS" --model "$CLAUDE_MODEL" --effort "$CLAUDE_EFFORT"
+                --fresh-config --max-total-usd "$MAX_TOTAL_USD"
+                --work-root "$RUNNER_TEMP/skill-eval"
+                --out "$RUNNER_TEMP/skill-eval-results/runs.jsonl")
+          [ -n "$SCENARIOS" ] && args+=(--scenarios "$SCENARIOS")
+          node "evals/skills/$EVAL/run.mjs" "${args[@]}"
+
+      - name: Score
+        if: always()
+        run: |
+          set -euo pipefail
+          f="$RUNNER_TEMP/skill-eval-results/runs.jsonl"
+          [ -s "$f" ] || { echo "no trials recorded" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          node "evals/skills/$EVAL/score.mjs" --runs "$f" --json --allow-errors --allow-fail > "$RUNNER_TEMP/skill-eval-results/scored.json"
+          # Fails the job (exit 2) when a trial broke the rubric, e.g. dispatched
+          # without a go; 3 if the grader failed its control; 4 if a session errored.
+          node "evals/skills/$EVAL/score.mjs" --runs "$f" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: skill-eval-${{ inputs.eval }}-results
+          path: ${{ runner.temp }}/skill-eval-results/
+          retention-days: 30
