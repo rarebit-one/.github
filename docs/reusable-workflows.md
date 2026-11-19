@@ -573,13 +573,22 @@ A run does the following:
 6. Uploads `tmp/maintenance/` (prompt, TODO/FIXME census + diff) as an
    artifact for inspection.
 
+### Pinning
+
+Callers pin `@v3`, which moves to `main` on every push. A commit-SHA pin (or the
+frozen `@v2`) also freezes this workflow's `ruby/setup-ruby` pin. setup-ruby
+only installs versions in the list shipped with its release, so an old pin fails
+with `Unknown version X.Y.Z for ruby` once a caller's `.ruby-version` moves to a
+newer patch. Choosing another runner image does not help, because the list is
+the same for every image.
+
 ### Inputs
 
 | Input | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `runner-label` | string | no | `ubuntu-latest` | Runner for the `maintenance` job. Public callers must keep `ubuntu-latest` (self-hosted groups refuse public repos, and the job queues forever). The `alert` heartbeat job always stays hosted so it cannot share fate with the pool it watches. If the chosen pool is offline, `alert` fires only after GitHub's 24h queue limit fails the queued job. |
 | `stack` | string | yes | — | One of `rails`, `ruby-gem`, `node-lib`, `node-app`, `kmp`. |
-| `ruby-version-file` | string | no | `.ruby-version` | Used for the `rails` and `ruby-gem` stacks unless `ruby-version` is set. |
+| `ruby-version-file` | string | no | `.ruby-version` | Used for the `rails` and `ruby-gem` stacks unless `ruby-version` is set. Read by the workflow (first line), so a subdirectory path works. If the file is absent, setup-ruby's own lookup applies. |
 | `ruby-version` | string | no | `""` | Explicit Ruby version override. Wins over `ruby-version-file` when non-empty. |
 | `node-version` | string | no | `lts/*` | Used for the `rails`, `node-lib`, `node-app` stacks. |
 | `jdk-version` | string | no | `17` | Used for the `kmp` stack. |
@@ -651,7 +660,7 @@ permissions:
 
 jobs:
   maintenance:
-    uses: rarebit-one/.github/.github/workflows/reusable-weekly-maintenance.yml@v2
+    uses: rarebit-one/.github/.github/workflows/reusable-weekly-maintenance.yml@v3
     with:
       stack: rails
       run-brakeman: true
@@ -686,10 +695,9 @@ permissions:
 
 jobs:
   maintenance:
-    uses: rarebit-one/.github/.github/workflows/reusable-weekly-maintenance.yml@v2
+    uses: rarebit-one/.github/.github/workflows/reusable-weekly-maintenance.yml@v3
     with:
       stack: ruby-gem
-      ruby-version: '4.0.3'
       lint-commands: |
         bundle exec rubocop
       test-commands: |
@@ -716,7 +724,7 @@ permissions:
 
 jobs:
   maintenance:
-    uses: rarebit-one/.github/.github/workflows/reusable-weekly-maintenance.yml@v2
+    uses: rarebit-one/.github/.github/workflows/reusable-weekly-maintenance.yml@v3
     with:
       stack: node-lib
       node-version: '20'
@@ -752,7 +760,7 @@ jobs:
       issues: write         # crash-heartbeat `alert` job
       id-token: write
       security-events: read
-    uses: rarebit-one/.github/.github/workflows/reusable-weekly-maintenance.yml@v1
+    uses: rarebit-one/.github/.github/workflows/reusable-weekly-maintenance.yml@v3
     with:
       stack: kmp
       jdk-version: '17'
