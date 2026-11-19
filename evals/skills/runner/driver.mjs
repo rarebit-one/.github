@@ -24,7 +24,7 @@ export function commonFlags(argv, defaults) {
     opt, flag,
     scenarios: (opt("--scenarios") || defaults.scenarios.join(",")).split(",").map((s) => s.trim()).filter(Boolean),
     n: Number(opt("--n", 3)),
-    model: opt("--model", process.env.CLAUDE_MODEL || defaults.model || "sonnet"),
+    ...resolveModel(argv, defaults),
     effort: opt("--effort", process.env.CLAUDE_EFFORT || ""),
     claudeBin: opt("--claude-bin", "claude"),
     timeoutS: Number(opt("--timeout-s", defaults.timeoutS ?? 1800)),
@@ -36,6 +36,27 @@ export function commonFlags(argv, defaults) {
     out: path.resolve(opt("--out", defaults.out)),
     workRoot: path.resolve(opt("--work-root", process.env.RUNNER_TEMP ? path.join(process.env.RUNNER_TEMP, defaults.name) : path.join(os.homedir(), ".cache", "skill-evals", defaults.name))),
   };
+}
+
+// Model precedence: --model, then $CLAUDE_MODEL, then the model the skill itself
+// asks for (defaults.model, from its frontmatter), then the `sonnet` alias. The
+// source goes into every record, next to the models the CLI actually served.
+export function resolveModel(argv, defaults = {}, env = process.env) {
+  const i = argv.indexOf("--model");
+  if (i >= 0 && argv[i + 1]) return { model: argv[i + 1], model_source: "flag" };
+  if (env.CLAUDE_MODEL) return { model: env.CLAUDE_MODEL, model_source: "env" };
+  if (defaults.model) return { model: defaults.model, model_source: "skill-frontmatter" };
+  return { model: "sonnet", model_source: "default" };
+}
+
+// A skill's frontmatter `model:` as a full model id (aliases mapped to the
+// current family, an explicit id kept as is), or null.
+export const MODEL_ALIASES = { opus: "claude-opus-5-5", sonnet: "claude-sonnet-5-5", haiku: "claude-haiku-5-5", fable: "claude-fable-5-2" };
+export function skillModel(skillText) {
+  const fm = String(skillText).match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  const m = fm && fm[1].match(/^model:\s*["']?([\w.\-\/\[\]]+)["']?\s*$/m);
+  if (!m || m[1] === "inherit") return null;
+  return MODEL_ALIASES[m[1]] || m[1];
 }
 
 export async function runTrials(o) {
@@ -73,7 +94,7 @@ export async function runTrials(o) {
         : null;
       const scrub = (c) => ({ ...c, args: (c.args || []).map(redact), out: redact(c.out || "").slice(0, 600), err: redact(c.err || "").slice(0, 300) });
       const rec = {
-        eval: o.name, scenario, trial, started, model_requested: o.model, effort: o.effort || null,
+        eval: o.name, scenario, trial, started, model_requested: o.model, model_source: o.model_source ?? null, effort: o.effort || null,
         model_aliases: Object.fromEntries(Object.entries(env).filter(([k]) => /^ANTHROPIC_DEFAULT_\w+_MODEL$|^CLAUDE_CODE_SUBAGENT_MODEL$/.test(k))),
         auth: env.ANTHROPIC_BASE_URL ? "gateway" : env.CLAUDE_CODE_OAUTH_TOKEN ? "oauth-token" : env.ANTHROPIC_API_KEY ? "api-key" : "cli-login",
         cli_version: init?.claude_code_version || cliVersion, init_model: init?.model ?? null,

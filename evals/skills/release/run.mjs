@@ -23,7 +23,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { git, installStub, makeSandbox, RUNNER_FILES, sh } from "../runner/sandbox.mjs";
-import { commonFlags, runTrials } from "../runner/driver.mjs";
+import { commonFlags, runTrials, skillModel } from "../runner/driver.mjs";
 import { buildSeed, REPO, SCENARIOS, TURNS, worldFor } from "./world.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -75,9 +75,13 @@ export function setupTrial({ runCtx, runRoot, keys, scenario }) {
 
 async function main() {
   const argv = process.argv.slice(2);
+  const skillPath = path.resolve((() => { const i = argv.indexOf("--skill"); return i >= 0 ? argv[i + 1] : path.join(ROOT, "skills", "release", "SKILL.md"); })());
+  // Evaluate on the model the skill runs on in production (its frontmatter says
+  // `model: opus`), unless --model or $CLAUDE_MODEL overrides it.
   const f = commonFlags(argv, { name: "release-eval", scenarios: SCENARIOS, timeoutS: 1200, maxRunUsd: 3, maxTotalUsd: 10,
+    model: skillModel(fs.readFileSync(skillPath, "utf8")),
     out: path.join(HERE, "results", `${new Date().toISOString().slice(0, 10)}-local.runs.jsonl`) });
-  const skillPath = path.resolve(f.opt("--skill", path.join(ROOT, "skills", "release", "SKILL.md")));
+  console.error(`model: ${f.model} (${f.model_source})`);
   process.exitCode = await runTrials({
     ...f, name: "release", allScenarios: SCENARIOS,
     setupRun: setupRun({ skillPath }), setupTrial,

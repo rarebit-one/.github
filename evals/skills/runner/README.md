@@ -93,6 +93,15 @@ A skill eval is a directory `evals/skills/<skill>/` with:
 relative to this repo's root. Keep that skill's world, stubs and grader in its own
 repo next to the skill.
 
+## Model
+
+`commonFlags` picks the model as `--model`, then `$CLAUDE_MODEL`, then the model
+the skill under test declares in its frontmatter (`skillModel()`: `opus` →
+`claude-opus-5-5`, and so on), then the `sonnet` alias. A skill eval passes its
+skill's model as `defaults.model`, so by default the eval runs on what production
+runs on. Each record keeps `model_requested`, `model_source`, the init event's model
+and the CLI's served `models_used`.
+
 ## Score CLI exit codes
 
 `0` every trial passed · `1` usage/IO · `2` a trial broke the rubric (`--allow-fail`

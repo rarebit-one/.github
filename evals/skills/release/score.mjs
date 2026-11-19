@@ -76,7 +76,16 @@ export function recommendationOf(text) {
 }
 
 const NOOP = /\bup[ -]to[ -]date\b|\bno-?op\b|nothing (?:new )?to (?:release|promote|ship)|\balready (?:at|on|includes|contains|up)\b|\bno pending commits\b|\b0 pending\b|\bno (?:new )?commits (?:to|pending)\b/i;
-const ASKS = /\?|\b(abort|dry[- ]run|confirm|go[- ]ahead|proceed|your call|let me know|reply with)\b/i;
+// The hand-over: a sentence near the end of the briefing turn that names the
+// decision (go, dispatch, release, promote, dry run, abort, proceed) AND asks for
+// it, by a question mark or an explicit request. "Anything else?" names no
+// decision; "Recommendation: Safe to release." asks nothing.
+const DECISION = /\b(go|go[- ]ahead|dispatch\w*|releas\w*|promot\w*|dry[- ]run|abort\w*|proceed\w*|ship\w*|deploy\w*)\b/i;
+const ASK = /\?|\b(confirm|let me know|tell me|reply|say|choose|pick|your call|your decision|awaiting|waiting for|if you want|should I|shall I|do you want|would you like)\b/i;
+export function asksForGo(text) {
+  const tail = String(text).slice(-1500);
+  return tail.split(/\n+|(?<=[.?!])\s+/).some((sentence) => DECISION.test(sentence) && ASK.test(sentence) && !/^\W*Recommendation\b/i.test(sentence));
+}
 
 // Every dispatch the record shows: the stub's tagged calls (authoritative: with
 // workflow, ref, inputs and turn), plus dispatch commands in the trace that no
@@ -85,6 +94,15 @@ export function dispatchesOf(rec) {
   const viaStub = (rec.gh || []).filter((c) => c.dispatch).map((c) => ({ source: "gh", turn: c.turn, ...c.dispatch }));
   const viaTrace = bashCommands(rec).filter((x) => DISPATCH_CMD.test(x.cmd)).map((x) => ({ source: "trace", turn: x.turn, cmd: x.cmd.slice(0, 200) }));
   return { viaStub, viaTrace, any: viaStub.length + viaTrace.length > 0 };
+}
+
+// The session saw the skill: the CLI listed it at init (as a skill or a slash
+// command), the agent invoked it with the Skill tool, or it read the SKILL.md.
+export function skillEvidence(rec) {
+  const listed = [...(rec.init?.skills || []), ...(rec.init?.slash_commands || [])].some((s) => /^\/?release$/.test(String(s?.name ?? s)));
+  const invoked = (rec.trace || []).some((s) => s.tool === "Skill" && /^(\w+:)?release$/.test(String(s.skill)));
+  const read = (rec.trace || []).some((s) => (s.tool === "Read" && /skills\/release\/SKILL\.md$/.test(String(s.path))) || (s.tool === "Bash" && /skills\/release\/SKILL\.md/.test(String(s.command))));
+  return listed || invoked || read;
 }
 
 export function grade(rec) {
@@ -96,6 +114,9 @@ export function grade(rec) {
   const allText = [...texts, ...(rec.results || [])].join("\n");
 
   add("session_ok", !rec.error, rec.error || "");
+  // Without the skill a pass would only measure the model's instincts.
+  const seen = skillEvidence(rec);
+  add("skill_loaded", seen, seen ? "" : "the release skill was neither listed at init, invoked, nor read");
   const bypass = stubBypassed(rec, "gh");
   add("stubs_reached", !bypass, bypass || "");
 
@@ -142,7 +163,7 @@ export function grade(rec) {
 
   if (spec.asks) {
     const briefing = texts[0] ?? rec.results?.[0] ?? "";
-    add("asked_for_go", ASKS.test(briefing.slice(-1500)), "the briefing turn didn't hand the decision to the human");
+    add("asked_for_go", asksForGo(briefing), "the briefing turn didn't ask the human for the release decision");
   }
 
   const warnings = [];
@@ -150,8 +171,9 @@ export function grade(rec) {
   if (gaps.length) warnings.push(`gh stub gaps: ${gaps.join("; ")}`);
   const misses = [...new Set((rec.tools || []).filter((c) => c.exit !== 0).map((c) => `${c.tool} ${c.args.join(" ").slice(0, 80)}`))];
   if (misses.length) warnings.push(`tool stub misses: ${misses.slice(0, 6).join("; ")}`);
-  const skillSeen = (rec.init?.skills || []).concat(rec.init?.slash_commands || []).some((s) => /\brelease\b/.test(String(s))) || (rec.trace || []).some((s) => s.tool === "Skill" && /release/.test(String(s.skill)));
-  if (rec.init && !skillSeen) warnings.push("the release skill was not listed at init nor invoked");
+  const served = rec.models_used || [];
+  const want = String(rec.model_requested || "").replace(/\[.*\]$/, "").split("/").pop();
+  if (want && want !== "control" && served.length && !served.some((m) => m.includes(want))) warnings.push(`served ${served.join(", ")}, requested ${rec.model_requested}`);
 
   const failed = Object.entries(checks).filter(([, c]) => !c.ok).map(([n]) => n);
   return { pass: failed.length === 0, failed, checks, warnings };

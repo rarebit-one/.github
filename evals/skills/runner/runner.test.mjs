@@ -12,6 +12,7 @@ import { executable, runScoreCli, selfTest, stubBypassed } from "./grade.mjs";
 import { curlAnswer } from "./http-stub.mjs";
 import { cannedAnswer } from "./canned-stub.mjs";
 import { fieldsOf, parseArgs } from "./stub-core.mjs";
+import { resolveModel, skillModel } from "./driver.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "skill-eval-test-"));
@@ -152,4 +153,21 @@ test("selfTest catches a grader that always passes or always fails", () => {
   assert.ok(selfTest({ control, grade: () => ({ pass: true, failed: [] }), scenarios: ["s"] }).some((f) => /PASSED/.test(f)));
   assert.ok(selfTest({ control, grade: () => ({ pass: false, failed: ["x"] }), scenarios: ["s"] }).some((f) => /known-good .* failed/.test(f)));
   assert.ok(selfTest({ control, grade: () => ({ pass: true, failed: [] }), scenarios: ["s", "t"] }).some((f) => /t: no known-good/.test(f)));
+});
+
+// ---- model ---------------------------------------------------------------------------
+
+test("skillModel reads the frontmatter model and maps aliases to full ids", () => {
+  assert.equal(skillModel("---\nname: x\nmodel: opus\n---\n# X"), "claude-opus-5-5");
+  assert.equal(skillModel("---\nmodel: \"sonnet\"\n---\n"), "claude-sonnet-5-5");
+  assert.equal(skillModel("---\nmodel: claude-haiku-5-5\n---\n"), "claude-haiku-5-5");
+  assert.equal(skillModel("---\nmodel: inherit\n---\n"), null);
+  assert.equal(skillModel("# no frontmatter\nmodel: opus\n"), null);
+});
+
+test("resolveModel: --model, then $CLAUDE_MODEL, then the skill's model, then sonnet", () => {
+  assert.deepEqual(resolveModel(["--model", "m1"], { model: "s" }, { CLAUDE_MODEL: "e" }), { model: "m1", model_source: "flag" });
+  assert.deepEqual(resolveModel([], { model: "s" }, { CLAUDE_MODEL: "e" }), { model: "e", model_source: "env" });
+  assert.deepEqual(resolveModel([], { model: "s" }, {}), { model: "s", model_source: "skill-frontmatter" });
+  assert.deepEqual(resolveModel([], {}, {}), { model: "sonnet", model_source: "default" });
 });

@@ -27,6 +27,18 @@ name: Skill eval
 #           Dispatch it on the branch that changes the skill (Actions → Skill eval
 #           → Run workflow, pick the branch) before merging.
 #
+# Model: by default each eval runs on the model its skill declares in its
+# frontmatter (/release says `model: opus` → claude-opus-5-5), not on
+# vars.CLAUDE_MODEL. Grading a skill on a model it doesn't run on in production
+# measures the wrong thing. The `model` input overrides it, and every record shows
+# the model requested, where that came from, and the models the CLI actually served.
+#
+# Retention: the uploaded artifact expires after 30 days. The llm-evals convention
+# (rarebit-sre .claude/conventions/llm-evals.md) wants results kept longer, so
+# each live run's runs.jsonl and scored summary are committed by hand to
+# evals/skills/<eval>/results/<date>-ci-<run id>.{runs.jsonl,json}. This workflow
+# has no write permission and never commits.
+#
 # Runner: GitHub-hosted ubuntu-latest, never a self-hosted label. The agent runs
 # arbitrary Bash, so it gets an ephemeral VM rather than a persistent runner.
 
@@ -53,7 +65,7 @@ on:
         required: false
         default: '3'
       model:
-        description: 'Model (blank = vars.CLAUDE_MODEL, else claude-sonnet-5-5)'
+        description: "Model override (blank = the skill's own frontmatter model; /release: claude-opus-5-5)"
         required: false
         default: ''
       max_total_usd:
@@ -110,7 +122,7 @@ jobs:
       # re-run the eval on the bump PR.
       CLAUDE_CLI_VERSION: '2.1.322'
       CLAUDE_EFFORT: ${{ vars.CLAUDE_EFFORT || 'high' }}
-      CLAUDE_MODEL: ${{ inputs.model || vars.CLAUDE_MODEL || 'claude-sonnet-5-5' }}
+      MODEL_OVERRIDE: ${{ inputs.model }}
       EVAL: ${{ inputs.eval }}
       SCENARIOS: ${{ inputs.scenarios }}
       TRIALS: ${{ inputs.n }}
@@ -130,6 +142,7 @@ jobs:
           [[ "$TRIALS" =~ ^[1-9][0-9]?$ ]] || { echo "::error::n must be 1-99"; exit 1; }
           [[ "$MAX_TOTAL_USD" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::max_total_usd must be a number"; exit 1; }
           [[ -z "$SCENARIOS" || "$SCENARIOS" =~ ^[a-z0-9,-]+$ ]] || { echo "::error::bad scenarios list"; exit 1; }
+          [[ -z "$MODEL_OVERRIDE" || "$MODEL_OVERRIDE" =~ ^[A-Za-z0-9._/:\[\]-]+$ ]] || { echo "::error::bad model id"; exit 1; }
 
       - name: Install the pinned Claude Code CLI
         run: npm install -g "@anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}"
@@ -140,11 +153,12 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
           set -euo pipefail
-          args=(--n "$TRIALS" --model "$CLAUDE_MODEL" --effort "$CLAUDE_EFFORT"
+          args=(--n "$TRIALS" --effort "$CLAUDE_EFFORT"
                 --fresh-config --max-total-usd "$MAX_TOTAL_USD"
                 --work-root "$RUNNER_TEMP/skill-eval"
                 --out "$RUNNER_TEMP/skill-eval-results/runs.jsonl")
           [ -n "$SCENARIOS" ] && args+=(--scenarios "$SCENARIOS")
+          [ -n "$MODEL_OVERRIDE" ] && args+=(--model "$MODEL_OVERRIDE")
           node "evals/skills/$EVAL/run.mjs" "${args[@]}"
 
       - name: Score
@@ -154,6 +168,11 @@ jobs:
           f="$RUNNER_TEMP/skill-eval-results/runs.jsonl"
           [ -s "$f" ] || { echo "no trials recorded" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
           node "evals/skills/$EVAL/score.mjs" --runs "$f" --json --allow-errors --allow-fail > "$RUNNER_TEMP/skill-eval-results/scored.json"
+          {
+            echo "> **Keep these results.** The artifact expires in 30 days. Commit \`runs.jsonl\` and \`scored.json\` from it to"
+            echo "> \`evals/skills/$EVAL/results/$(date -u +%F)-ci-$GITHUB_RUN_ID.runs.jsonl\` and \`.json\` (llm-evals convention: results kept longer than 30 days)."
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
           # Fails the job (exit 2) when a trial broke the rubric, e.g. dispatched
           # without a go; 3 if the grader failed its control; 4 if a session errored.
           node "evals/skills/$EVAL/score.mjs" --runs "$f" | tee -a "$GITHUB_STEP_SUMMARY"
