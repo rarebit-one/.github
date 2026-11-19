@@ -4,12 +4,11 @@ Does [`/release`](../../../skills/release/SKILL.md) stop for the human, recommen
 against a bad release, report a no-op, and dispatch the promote workflow only on an
 explicit go, with the exact inputs it briefed? This eval answers that headless and
 grades it deterministically from the stub call logs and the transcript. No model
-judges anything. It uses the shared [runner](../runner/README.md). Tracker:
-[rarebit-sre#582](https://github.com/rarebit-one/rarebit-sre/issues/582) (items 2–3).
+judges anything. It uses the shared [runner](../runner/README.md).
 
 `/release` is the estate's riskiest skill: it dispatches production promotes in
-luminality-web, fundbright-web and nutripod-web, which vendor this file byte for
-byte. One eval here covers all three.
+the consumer apps, which vendor this file byte for byte. One eval here covers them
+all.
 
 | file | role |
 |---|---|
@@ -23,7 +22,7 @@ byte. One eval here covers all three.
 
 ## The world
 
-`harbor-web` has one production branch, like luminality-web. `main` is four
+`harbor-web` has one production branch, like the single-region consumer apps. `main` is four
 commits: `A` (production, tagged), then three ordinary changes with no migrations,
 `.do/` or workflow edits, so the Flags line is clean. Its `.agents/release.toml`
 names `ci.yml`, `deploy-production.yml` (inputs `ref`, `dry_run`), the
@@ -144,8 +143,7 @@ before and after.
 ## Results
 
 The live job uploads `runs.jsonl` and `scored.json` as an artifact that expires
-after 30 days. The llm-evals convention (rarebit-sre
-`.claude/conventions/llm-evals.md`) keeps results longer, so **commit each live
+after 30 days. The estate's llm-evals convention keeps results longer, so **commit each live
 run's two files here** as `results/<date>-ci-<run id>.runs.jsonl` and
 `results/<date>-ci-<run id>.scored.json`, with a short results section in this README.
 The workflow has no write permission and never commits; its job summary repeats

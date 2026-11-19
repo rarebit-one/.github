@@ -8,7 +8,7 @@
 // onTurn(k), which the runner uses to bump <state>/turn, so every stub log line
 // says which turn it came from.
 //
-// Isolation (as sidekick-web's /ship eval and octo-brain's agent-navigation):
+// Isolation (as in the earlier /ship and agent-navigation evals):
 // `--setting-sources project` (no user settings, hooks or plugins),
 // `--strict-mcp-config` with no MCP config, `--no-session-persistence`, no
 // WebFetch/WebSearch, and no AskUserQuestion (a headless session has nobody to

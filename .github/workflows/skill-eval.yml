@@ -1,6 +1,6 @@
 name: Skill eval
 
-# Evals for the estate's shared skills (evals/skills/, rarebit-one/rarebit-sre#582).
+# Evals for the estate's shared skills (evals/skills/).
 # Each eval runs a skill headless (`claude -p`) in a throwaway sandbox: a stub
 # `gh` and stub health/DO/Sentry CLIs answer for the scenario, the app's origin is
 # a local bare repo, and nothing can reach GitHub or production. score.mjs grades
@@ -33,8 +33,8 @@ name: Skill eval
 # measures the wrong thing. The `model` input overrides it, and every record shows
 # the model requested, where that came from, and the models the CLI actually served.
 #
-# Retention: the uploaded artifact expires after 30 days. The llm-evals convention
-# (rarebit-sre .claude/conventions/llm-evals.md) wants results kept longer, so
+# Retention: the uploaded artifact expires after 30 days. The estate's llm-evals
+# convention wants results kept longer, so
 # each live run's runs.jsonl and scored summary are committed by hand to
 # evals/skills/<eval>/results/<date>-ci-<run id>.{runs.jsonl,scored.json}. This workflow
 # has no write permission and never commits.
@@ -71,7 +71,7 @@ on:
       max_total_usd:
         description: 'Stop starting trials once API-equivalent spend could pass this'
         required: false
-        # sidekick-web's /ship eval measured ~US$0.45 per session; a /release
+        # an earlier /ship eval in another org measured ~US$0.45 per session; a /release
         # session is shorter (no commit/CI loop), so 12 sessions should fit well
         # under this. Each trial is also capped at --max-run-usd 3.
         default: '10'

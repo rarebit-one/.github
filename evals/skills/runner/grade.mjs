@@ -3,7 +3,7 @@
 // markdown report and the score CLI with its exit codes. Each skill supplies its
 // own grade(record) → { pass, failed, checks, warnings } and its control file.
 //
-// Positive control (octo-brain check-positive-controls.md): before any number is
+// Positive control (the estate's check-positive-controls convention): before any number is
 // printed, selfTest() grades the control: a known-good synthetic record per
 // scenario that must pass, and known-bad ones that must each fail on the check
 // named in their `expect_fail`. A broken control makes the run INVALID (exit 3).

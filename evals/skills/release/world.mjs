@@ -2,8 +2,8 @@
 // GitHub, staging, production, DigitalOcean and Sentry report.
 //
 // The app is `example-org/harbor-web`, a stand-in for an estate app that ships
-// with the shared branch-promote workflow (like luminality-web: one production
-// branch). Its main history, built once per run into a bare seed repo:
+// with the shared branch-promote workflow (like the single-region consumer apps:
+// one production branch). Its main history, built once per run into a bare seed repo:
 //
 //   A  "Initial app"            ← `production` (scenarios 1–3), tag v<-8d>.1
 //   B  "Add order CSV export"
