@@ -12,7 +12,7 @@ name: Reusable Weekly Maintenance
 #     security-events: read   # required for the CodeQL alert review (read-only)
 #   jobs:
 #     maintenance:
-#       uses: <org>/.github/.github/workflows/reusable-weekly-maintenance.yml@v2
+#       uses: <org>/.github/.github/workflows/reusable-weekly-maintenance.yml@v3
 #       with:
 #         stack: rails
 #         run-brakeman: true
@@ -25,6 +25,13 @@ name: Reusable Weekly Maintenance
 # grant is not optional. Where the caller declares `permissions:` on the job that
 # `uses:` this workflow, put it THERE: a job-level block fully replaces the
 # top-level one for that job.
+#
+# Pin `@v3`, which advance-major-tag.yml moves to `main` on every push. Do not pin
+# a commit SHA or the frozen `@v2`: the pinned commit also freezes this file's
+# `ruby/setup-ruby` pin, and setup-ruby only installs Ruby versions that are in
+# the version list shipped with that release. A caller pinned to an old commit
+# fails with "Unknown version X.Y.Z" as soon as its `.ruby-version` moves to a
+# newer patch, on every runner image. Dependabot keeps the pin on `main` current.
 #
 # See docs/reusable-workflows.md for the full input contract.
 
@@ -48,7 +55,11 @@ on:
         required: true
         type: string
       ruby-version-file:
-        description: 'Path to .ruby-version file (rails, ruby-gem stacks).'
+        description: >-
+          Path to the .ruby-version file, relative to the repository root
+          (rails, ruby-gem stacks). A subdirectory path works. If the file is
+          absent, setup-ruby falls back to its own lookup (.ruby-version,
+          .tool-versions, mise.toml).
         required: false
         type: string
         default: '.ruby-version'
@@ -218,12 +229,40 @@ jobs:
 
       # ----- stack setup -----
 
+      # ruby/setup-ruby has no `ruby-version-file` input: it warned "Unexpected
+      # input" on every run and ignored any non-default path. Read the file here
+      # and hand setup-ruby an explicit version instead.
+      - name: Resolve Ruby version
+        id: ruby-version
+        if: ${{ inputs.stack == 'rails' || inputs.stack == 'ruby-gem' }}
+        env:
+          RUBY_VERSION_INPUT: ${{ inputs.ruby-version }}
+          RUBY_VERSION_FILE: ${{ inputs.ruby-version-file }}
+        run: |
+          set -euo pipefail
+          if [ -n "$RUBY_VERSION_INPUT" ]; then
+            version="$RUBY_VERSION_INPUT"
+            source="input ruby-version"
+          elif [ -n "$RUBY_VERSION_FILE" ] && [ -f "$RUBY_VERSION_FILE" ]; then
+            version="$(head -n 1 -- "$RUBY_VERSION_FILE" | tr -d '[:space:]')"
+            source="$RUBY_VERSION_FILE"
+          else
+            # setup-ruby's own lookup: .ruby-version, .tool-versions, mise.toml.
+            version="default"
+            source="setup-ruby default lookup"
+          fi
+          if ! printf '%s' "$version" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._+-]*$'; then
+            echo "::error::Unusable Ruby version '${version}' from ${source}"
+            exit 1
+          fi
+          echo "Ruby version: ${version} (from ${source})"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
       - name: Set up Ruby
         if: ${{ inputs.stack == 'rails' || inputs.stack == 'ruby-gem' }}
         uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
         with:
-          ruby-version: ${{ inputs.ruby-version != '' && inputs.ruby-version || '' }}
-          ruby-version-file: ${{ inputs.ruby-version == '' && inputs.ruby-version-file || '' }}
+          ruby-version: ${{ steps.ruby-version.outputs.version }}
           bundler-cache: true
 
       - name: Set up Node.js
