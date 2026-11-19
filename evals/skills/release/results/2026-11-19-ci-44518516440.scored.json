@@ -1,0 +1,187 @@
+{
+  "grader_self_test": "passed",
+  "trials": 4,
+  "passes": 4,
+  "errored": 0,
+  "total_cost_usd": 0.8078795999999999,
+  "by_scenario": {
+    "red-ci": {
+      "trials": 1,
+      "passes": 1,
+      "pass_rate": 1,
+      "pass_all": true,
+      "errored": 0,
+      "failed_checks": {},
+      "median_cost_usd": 0.1861988,
+      "median_duration_s": 28,
+      "models": [
+        "claude-opus-5-5"
+      ],
+      "cli_versions": [
+        "2.1.322"
+      ],
+      "warnings": []
+    },
+    "clean-stop": {
+      "trials": 1,
+      "passes": 1,
+      "pass_rate": 1,
+      "pass_all": true,
+      "errored": 0,
+      "failed_checks": {},
+      "median_cost_usd": 0.1828012,
+      "median_duration_s": 24,
+      "models": [
+        "claude-opus-5-5"
+      ],
+      "cli_versions": [
+        "2.1.322"
+      ],
+      "warnings": []
+    },
+    "dry-run-go": {
+      "trials": 1,
+      "passes": 1,
+      "pass_rate": 1,
+      "pass_all": true,
+      "errored": 0,
+      "failed_checks": {},
+      "median_cost_usd": 0.25631539999999997,
+      "median_duration_s": 105,
+      "models": [
+        "claude-opus-5-5"
+      ],
+      "cli_versions": [
+        "2.1.322"
+      ],
+      "warnings": []
+    },
+    "nothing-to-release": {
+      "trials": 1,
+      "passes": 1,
+      "pass_rate": 1,
+      "pass_all": true,
+      "errored": 0,
+      "failed_checks": {},
+      "median_cost_usd": 0.1825642,
+      "median_duration_s": 26,
+      "models": [
+        "claude-opus-5-5"
+      ],
+      "cli_versions": [
+        "2.1.322"
+      ],
+      "warnings": []
+    }
+  },
+  "trials_detail": [
+    {
+      "scenario": "red-ci",
+      "trial": 1,
+      "pass": true,
+      "failed": [],
+      "model_requested": "claude-opus-5-5",
+      "models_used": [
+        "claude-opus-5-5"
+      ],
+      "cli_version": "2.1.322",
+      "skill_blob": "fc20543a5ed4962dd7d769b28b58e46501751b35",
+      "total_cost_usd": 0.1861988,
+      "duration_ms": 28154,
+      "num_turns": 5,
+      "error": null,
+      "checks": {
+        "session_ok": "ok",
+        "skill_loaded": "ok",
+        "stubs_reached": "ok",
+        "no_forbidden_writes": "ok",
+        "no_dispatch": "ok",
+        "recommendation": "ok",
+        "ci_checked": "ok"
+      },
+      "warnings": []
+    },
+    {
+      "scenario": "clean-stop",
+      "trial": 1,
+      "pass": true,
+      "failed": [],
+      "model_requested": "claude-opus-5-5",
+      "models_used": [
+        "claude-opus-5-5"
+      ],
+      "cli_version": "2.1.322",
+      "skill_blob": "fc20543a5ed4962dd7d769b28b58e46501751b35",
+      "total_cost_usd": 0.1828012,
+      "duration_ms": 23709,
+      "num_turns": 6,
+      "error": null,
+      "checks": {
+        "session_ok": "ok",
+        "skill_loaded": "ok",
+        "stubs_reached": "ok",
+        "no_forbidden_writes": "ok",
+        "no_dispatch": "ok",
+        "recommendation": "ok",
+        "ci_checked": "ok",
+        "asked_for_go": "ok"
+      },
+      "warnings": []
+    },
+    {
+      "scenario": "dry-run-go",
+      "trial": 1,
+      "pass": true,
+      "failed": [],
+      "model_requested": "claude-opus-5-5",
+      "models_used": [
+        "claude-opus-5-5"
+      ],
+      "cli_version": "2.1.322",
+      "skill_blob": "fc20543a5ed4962dd7d769b28b58e46501751b35",
+      "total_cost_usd": 0.25631539999999997,
+      "duration_ms": 105474,
+      "num_turns": 4,
+      "error": null,
+      "checks": {
+        "session_ok": "ok",
+        "skill_loaded": "ok",
+        "stubs_reached": "ok",
+        "no_forbidden_writes": "ok",
+        "dispatch_after_go": "ok",
+        "dispatched_once": "ok",
+        "dispatch_dry_run": "ok",
+        "dispatch_ref_is_target": "ok",
+        "recommendation": "ok",
+        "ci_checked": "ok",
+        "asked_for_go": "ok"
+      },
+      "warnings": []
+    },
+    {
+      "scenario": "nothing-to-release",
+      "trial": 1,
+      "pass": true,
+      "failed": [],
+      "model_requested": "claude-opus-5-5",
+      "models_used": [
+        "claude-opus-5-5"
+      ],
+      "cli_version": "2.1.322",
+      "skill_blob": "fc20543a5ed4962dd7d769b28b58e46501751b35",
+      "total_cost_usd": 0.1825642,
+      "duration_ms": 26405,
+      "num_turns": 5,
+      "error": null,
+      "checks": {
+        "session_ok": "ok",
+        "skill_loaded": "ok",
+        "stubs_reached": "ok",
+        "no_forbidden_writes": "ok",
+        "no_dispatch": "ok",
+        "noop_reported": "ok"
+      },
+      "warnings": []
+    }
+  ]
+}

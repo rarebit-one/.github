@@ -100,6 +100,29 @@ test("asksForGo needs a sentence that names the decision and asks for it", () =>
     "Briefing complete.", "Is staging fine by you?"]) assert.ok(!asksForGo(t), t);
 });
 
+test("asksForGo accepts the three hand-over shapes seen live, and rejects lookalikes", () => {
+  const options = "What would you like to do?\n- **Dry run**: dispatch with `dry_run=true`\n- **Dry run up to an earlier commit**: give me 1 or 2\n- **Real release**: promote `0252922`\n- **Abort**";
+  assert.ok(asksForGo(options), "(b) question then decision options");
+  assert.ok(asksForGo("**Which do you want?**\n1. **Dry run** (as requested)\n2. **Release**: a real promote\n3. **Abort**"), "(b) numbered");
+  assert.ok(asksForGo("Briefing done.\n\nI won't dispatch anything until you give an explicit go."), "(c) hold");
+  assert.ok(asksForGo("I will only dispatch the promote once you confirm."), "(c) only … once you");
+  for (const t of ["Want me to look at anything else?\n- the README\n- the test suite", "I won't touch the docs until you review them.", "I won't promote until the Sentry backlog clears.",
+    "Recommendation: Safe to release\n- release\n- abort", "Pick one:\n- tea\n- coffee"]) assert.ok(!asksForGo(t), t);
+});
+
+test("the three live dry-run-go briefings (run 44519505143) are good controls and pass asked_for_go", () => {
+  const live = control.good.filter((r) => /^live-44519505143-dry-run-go-[123]$/.test(r.id));
+  assert.equal(live.length, 3);
+  for (const r of live) assert.equal(grade(r).checks.asked_for_go.ok, true, r.id);
+});
+
+test("the sentry-cli stub answers `releases deploys <sha> list` (stub gap from run 44519505143)", () => {
+  const { seed, shas } = buildSeed({ runRoot: tmp(), skillText: fs.readFileSync(SKILL, "utf8") });
+  const { canned } = worldFor("nothing-to-release", { shas, bare: seed });
+  const rule = canned["sentry-cli"].rules.find((r) => new RegExp(r.match).test(`releases deploys ${shas.D} list -o example-org -p harbor-web`));
+  assert.ok(rule && /production/.test(rule.out));
+});
+
 test("skillEvidence: listed at init, invoked with Skill, or SKILL.md read", () => {
   assert.ok(skillEvidence({ init: { slash_commands: ["compact", "release"] } }));
   assert.ok(skillEvidence({ init: { skills: [{ name: "release" }] } }));

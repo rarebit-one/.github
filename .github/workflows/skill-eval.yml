@@ -36,7 +36,7 @@ name: Skill eval
 # Retention: the uploaded artifact expires after 30 days. The llm-evals convention
 # (rarebit-sre .claude/conventions/llm-evals.md) wants results kept longer, so
 # each live run's runs.jsonl and scored summary are committed by hand to
-# evals/skills/<eval>/results/<date>-ci-<run id>.{runs.jsonl,json}. This workflow
+# evals/skills/<eval>/results/<date>-ci-<run id>.{runs.jsonl,scored.json}. This workflow
 # has no write permission and never commits.
 #
 # Runner: GitHub-hosted ubuntu-latest, never a self-hosted label. The agent runs
@@ -170,7 +170,7 @@ jobs:
           node "evals/skills/$EVAL/score.mjs" --runs "$f" --json --allow-errors --allow-fail > "$RUNNER_TEMP/skill-eval-results/scored.json"
           {
             echo "> **Keep these results.** The artifact expires in 30 days. Commit \`runs.jsonl\` and \`scored.json\` from it to"
-            echo "> \`evals/skills/$EVAL/results/$(date -u +%F)-ci-$GITHUB_RUN_ID.runs.jsonl\` and \`.json\` (llm-evals convention: results kept longer than 30 days)."
+            echo "> \`evals/skills/$EVAL/results/$(date -u +%F)-ci-$GITHUB_RUN_ID.runs.jsonl\` and \`.scored.json\` (llm-evals convention: results kept longer than 30 days)."
             echo
           } >> "$GITHUB_STEP_SUMMARY"
           # Fails the job (exit 2) when a trial broke the rubric, e.g. dispatched

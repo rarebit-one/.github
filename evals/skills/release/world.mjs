@@ -210,11 +210,11 @@ export function worldFor(scenario, { shas, bare, now = Date.now() }) {
       "sentry-cli": {
         rules: [
           { match: "^issues list\\b", out: "No issues found\n" },
-          { match: "^(releases info|deploys list)\\b", out: sentryDeploys },
+          { match: "^(releases info|deploys list|releases deploys)\\b", out: sentryDeploys },
           { match: "^(--version|-V)", out: "sentry-cli 2.58.2\n" },
           { match: "^info\\b", out: "Sentry Server: https://sentry.io\nDefault Organization: example-org\nDefault Project: harbor-web\n" },
         ],
-        default: { exit: 1, err: "error: this eval's sentry-cli stub only answers issues list, releases info and deploys list\n" },
+        default: { exit: 1, err: "error: this eval's sentry-cli stub only answers issues list, releases info, releases deploys and deploys list\n" },
       },
     },
     facts: { target: D, production, base: A, base_tag: baseTag, pending: scenario === "nothing-to-release" ? 0 : 3, ci_on_target: ciRed ? "failure" : "success" },
