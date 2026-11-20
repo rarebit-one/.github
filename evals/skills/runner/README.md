@@ -106,4 +106,4 @@ and the CLI's served `models_used`.
 
 `0` every trial passed · `1` usage/IO · `2` a trial broke the rubric (`--allow-fail`
 reports only) · `3` INVALID: the grader failed its positive control · `4` a session
-errored (`--allow-errors`) · and `run.mjs` exits `5` when the cost cap stopped it.
+errored (`--allow-errors`) · and `run.mjs` exits `5` when the cost cap stopped it, or `6` when a session reported that the model account hit a limit (it starts no further trials and keeps the limit message in that record's `error`).

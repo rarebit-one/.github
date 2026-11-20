@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { childEnv } from "./sandbox.mjs";
-import { claudeArgs, parseStream, runSession, sessionTotals, userMessage } from "./session.mjs";
+import { ACCOUNT_LIMIT, accountLimit, claudeArgs, parseStream, runSession, sessionTotals, userMessage } from "./session.mjs";
 import { executable, runScoreCli, selfTest, stubBypassed } from "./grade.mjs";
 import { curlAnswer } from "./http-stub.mjs";
 import { cannedAnswer } from "./canned-stub.mjs";
@@ -170,4 +170,15 @@ test("resolveModel: --model, then $CLAUDE_MODEL, then the skill's model, then so
   assert.deepEqual(resolveModel([], { model: "s" }, { CLAUDE_MODEL: "e" }), { model: "e", model_source: "env" });
   assert.deepEqual(resolveModel([], { model: "s" }, {}), { model: "s", model_source: "skill-frontmatter" });
   assert.deepEqual(resolveModel([], {}, {}), { model: "sonnet", model_source: "default" });
+});
+
+test("an account limit is recognised and its text kept in the error", () => {
+  const limited = [{ type: "result", subtype: "success", is_error: true, result: "You've hit your weekly limit · resets Nov 23, 7am (UTC)" }];
+  assert.match(accountLimit(limited), /weekly limit/);
+  assert.match(sessionTotals(limited).error, /^is_error: success: You've hit your weekly limit/);
+  for (const t of ["You've reached your usage limit", "Claude usage limit reached", "You've hit your 5-hour limit"]) assert.ok(ACCOUNT_LIMIT.test(t), t);
+  // Ordinary failures are not account limits: they must not stop the run.
+  assert.equal(accountLimit([{ is_error: true, subtype: "error_max_budget_usd", result: "" }]), null);
+  assert.equal(accountLimit([{ is_error: false, result: "the rate limit on this endpoint is 600/min" }]), null);
+  assert.equal(accountLimit([{ is_error: true, subtype: "error_during_execution", result: "API rate limit exceeded for GitHub" }]), null);
 });

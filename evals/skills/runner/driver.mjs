@@ -10,12 +10,13 @@
 //       → { sandbox, state, cwd, turns: [msg, …], collect(redact) → extra fields }
 //
 // Cost cap: no trial starts once spend so far plus --max-run-usd could pass
-// --max-total-usd (exit 5). Spend is the CLI's API-equivalent `total_cost_usd`.
+// --max-total-usd (exit 5), or after the first session that reports an account limit
+// (exit 6). Spend is the CLI's API-equivalent `total_cost_usd`.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { childEnv, ensureKey, readJsonl, readPushes, redactor, setTurn, sh } from "./sandbox.mjs";
-import { claudeArgs, parseStream, runSession, sessionTotals } from "./session.mjs";
+import { accountLimit, claudeArgs, parseStream, runSession, sessionTotals } from "./session.mjs";
 
 export function commonFlags(argv, defaults) {
   const opt = (n, d) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : d; };
@@ -114,6 +115,8 @@ export async function runTrials(o) {
       spent += rec.total_cost_usd || 0;
       console.error(`[${scenario} #${trial}] ${(r.wall_ms / 1000).toFixed(0)}s $${(rec.total_cost_usd || 0).toFixed(2)} gh=${rec.gh.length} pushes=${rec.pushes.length}${o.summarize ? " " + o.summarize(rec) : ""}${error ? " ERROR " + error : ""}`);
       if (!o.keep) fs.rmSync(t.sandbox, { recursive: true, force: true });
+      const limit = accountLimit(results);
+      if (limit) { console.error(`STOP: the model account hit a limit ("${limit}"); no further trials started`); exit = 6; break outer; }
     }
   }
   if (!o.keep) fs.rmSync(runRoot, { recursive: true, force: true });

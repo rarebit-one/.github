@@ -80,8 +80,26 @@ export function sessionTotals(results) {
     duration_ms: results.reduce((a, r) => a + (r.duration_ms || 0), 0) || null,
     models_used: [...new Set(results.flatMap((r) => Object.keys(r.modelUsage || {})))],
     usage: last.usage ? { input_tokens: last.usage.input_tokens, output_tokens: last.usage.output_tokens, cache_read_input_tokens: last.usage.cache_read_input_tokens, cache_creation_input_tokens: last.usage.cache_creation_input_tokens } : null,
-    error: results.find((r) => r.is_error) ? `is_error: ${results.find((r) => r.is_error).subtype || ""}` : null,
+    error: errorOf(results),
   };
+}
+
+// The first error result, with its text: an account limit comes back as
+// `subtype: "success", is_error: true` and the reason only in `result`.
+function errorOf(results) {
+  const e = results.find((r) => r.is_error);
+  if (!e) return null;
+  const text = String(e.result ?? "").trim().slice(0, 160);
+  return `is_error: ${e.subtype || ""}${text ? `: ${text}` : ""}`;
+}
+
+// The CLI's message when the model account itself is out of quota, e.g.
+// "You've hit your weekly limit · resets Nov 23, 7am (UTC)". Every later trial
+// would fail the same way, so the driver stops instead of starting them.
+export const ACCOUNT_LIMIT = /\b(hit|reached|exceeded) your (weekly |daily |monthly |session |5-hour |usage )?limit\b|\busage limit (reached|exceeded)\b/i;
+export function accountLimit(results) {
+  const e = results.find((r) => r.is_error && ACCOUNT_LIMIT.test(String(r.result ?? "")));
+  return e ? String(e.result).trim().slice(0, 160) : null;
 }
 
 export function runSession({ bin, args, cwd, env, turns, timeoutS, onTurn = () => {} }) {
