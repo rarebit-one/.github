@@ -12,6 +12,8 @@
 //
 // The script is a JSON file named by FAKE_CLAUDE_SCRIPT:
 //   { "turns": [ { "bash": ["cmd", …], "text": "briefing…" }, … ], "cost": 0.01 }
+// A turn of { "limit": "You've hit your weekly limit · …" } answers the way the real
+// CLI does when the account is out of quota: one error result, no tool calls, no cost.
 import fs from "node:fs";
 import readline from "node:readline";
 import { spawnSync } from "node:child_process";
@@ -27,6 +29,10 @@ const rl = readline.createInterface({ input: process.stdin });
 rl.on("line", (line) => {
   if (!line.trim()) return;
   const step = script.turns[turn++] || { bash: [], text: "(no scripted turn)" };
+  if (step.limit) {
+    emit({ type: "result", subtype: "success", is_error: true, result: step.limit, num_turns: 1, duration_ms: 400, total_cost_usd: 0, modelUsage: {}, usage: { input_tokens: 0, output_tokens: 0 } });
+    return;
+  }
   for (const cmd of step.bash || []) {
     const tid = `toolu_fake_${++id}`;
     emit({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: tid, name: "Bash", input: { command: cmd } }] } });

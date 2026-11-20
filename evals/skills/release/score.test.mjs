@@ -287,3 +287,19 @@ test("end to end: dispatching before the go fails dry-run-go; pushing production
   assert.ok(g.failed.includes("no_forbidden_writes"), g.failed.join(","));
   assert.equal(push.pushes[0].ref, "refs/heads/production");
 });
+
+test("end to end: an account limit stops the run after the first trial (exit 6)", async () => {
+  const dir = tmp();
+  const script = path.join(dir, "agent.json");
+  fs.writeFileSync(script, JSON.stringify({ turns: [{ limit: "You've hit your weekly limit · resets Nov 23, 7am (UTC)" }] }));
+  const bin = path.join(dir, "claude");
+  fs.writeFileSync(bin, `#!/bin/sh\nFAKE_CLAUDE_SCRIPT=${script} exec "${process.execPath}" "${path.join(HERE, "..", "runner", "fake-claude.mjs")}" "$@"\n`, { mode: 0o755 });
+  const out = path.join(dir, "runs.jsonl");
+  const exit = await runTrials({ name: "release", allScenarios: SCENARIOS, scenarios: ["red-ci", "clean-stop"], n: 3, model: "fake", effort: "", claudeBin: bin, timeoutS: 60,
+    maxRunUsd: 1, maxTotalUsd: 5, freshConfig: true, keep: false, resume: false, out, workRoot: path.join(dir, "work"),
+    setupRun: setupRun({ skillPath: SKILL }), setupTrial });
+  assert.equal(exit, 6);
+  const recs = readJsonl(out);
+  assert.equal(recs.length, 1, "no trial may start after the limit");
+  assert.match(recs[0].error, /weekly limit/);
+});
