@@ -42,6 +42,20 @@ on:
         required: false
         type: string
         default: 'CHANGELOG.md'
+      new-gem-owner:
+        description: >-
+          RubyGems.org account (immutable numeric ID, as shown on that account's
+          Pending Trusted Publishers page) that will own a gem being published
+          for the FIRST time. RubyGems.org rejects a first trusted-publishing
+          push whose OIDC exchange does not name the owner, and
+          rubygems/configure-rubygems-credentials has no `owner` input yet, so
+          when this is set the publish job does the exchange itself. Leave
+          empty for every release after the first. Falls back to the caller
+          repository's `RUBYGEMS_NEW_GEM_OWNER` variable, so a first release
+          needs no caller change.
+        required: false
+        type: string
+        default: ''
       sibling-checkouts:
         description: |
           JSON array of sibling repositories to clone before `bundle install`
@@ -226,7 +240,44 @@ jobs:
       # populates GEM_HOST_API_KEY for the subsequent gem push.
 
       - name: Configure RubyGems credentials via OIDC
+        if: ${{ inputs.new-gem-owner == '' && vars.RUBYGEMS_NEW_GEM_OWNER == '' }}
         uses: rubygems/configure-rubygems-credentials@dc5a8d8553e6ee01fc26761a49e99e733d17954a # v2.1.0
+
+      # First release of a new gem. RubyGems.org (since 2026-10-30) creates a
+      # gem from a pending trusted publisher only when the OIDC exchange names
+      # the owning account (`owner`). Same exchange as the action above
+      # (POST /api/v1/oidc/trusted_publisher/exchange_token with the GitHub
+      # OIDC token for audience rubygems.org), plus `owner`; the resulting
+      # short-lived push key is masked and exported the same way.
+      - name: Configure RubyGems credentials via OIDC (first release, with owner)
+        if: ${{ inputs.new-gem-owner != '' || vars.RUBYGEMS_NEW_GEM_OWNER != '' }}
+        env:
+          OWNER: ${{ inputs.new-gem-owner || vars.RUBYGEMS_NEW_GEM_OWNER }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$OWNER" =~ ^[0-9]+$ ]]; then
+            echo "::error::new-gem-owner must be the owner's numeric RubyGems.org account ID"
+            exit 1
+          fi
+          JWT=$(curl -sSf -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=rubygems.org" | jq -r '.value')
+          echo "::add-mask::${JWT}"
+          BODY=$(jq -n --arg jwt "$JWT" --arg owner "$OWNER" '{jwt: $jwt, owner: $owner}')
+          RESP=$(curl -sS -X POST https://rubygems.org/api/v1/oidc/trusted_publisher/exchange_token \
+            -H 'Content-Type: application/json' -H 'Accept: application/json' --data "$BODY")
+          KEY=$(echo "$RESP" | jq -r '.rubygems_api_key // empty' 2>/dev/null || true)
+          if [ -z "$KEY" ]; then
+            ERR=$(echo "$RESP" | jq -c '.errors // .error // .' 2>/dev/null || echo "unparseable response")
+            echo "::error::RubyGems.org OIDC exchange failed: ${ERR}"
+            exit 1
+          fi
+          echo "::add-mask::${KEY}"
+          {
+            echo "RUBYGEMS_API_KEY=${KEY}"
+            echo "BUNDLE_GEM__PUSH_KEY=${KEY}"
+            echo "GEM_HOST_API_KEY=${KEY}"
+          } >> "$GITHUB_ENV"
+          echo "Exchanged OIDC token for a push key owned by account ${OWNER}: $(echo "$RESP" | jq -c '{name, scopes, owner, expires_at}')"
 
       - name: Build gem
         env:
