@@ -4,10 +4,10 @@ This repo hosts reusable GitHub Actions workflows shared across rarebit-one
 gems and apps. Consumers reference workflows here via:
 
 ```yaml
-uses: rarebit-one/.github/.github/workflows/<name>.yml@v2
+uses: rarebit-one/.github/.github/workflows/<name>.yml@v3
 ```
 
-Pin to the `v2` tag (or a specific SHA) — `@main` works but does not give you
+Pin to the `v3` tag (or a specific SHA) — `@main` works but does not give you
 a stable contract.
 
 Available reusable workflows:
@@ -341,7 +341,7 @@ on:
 
 jobs:
   ci:
-    uses: rarebit-one/.github/.github/workflows/reusable-gem-ci.yml@v1
+    uses: rarebit-one/.github/.github/workflows/reusable-gem-ci.yml@v3
     with:
       ruby-versions: '["3.4.4","4.0.3"]'
 ```
@@ -358,7 +358,7 @@ on:
 
 jobs:
   ci:
-    uses: rarebit-one/.github/.github/workflows/reusable-gem-ci.yml@v1
+    uses: rarebit-one/.github/.github/workflows/reusable-gem-ci.yml@v3
     with:
       ruby-versions: '["4.0.3"]'
       apt-packages: 'build-essential git libyaml-dev pkg-config google-chrome-stable'
@@ -387,7 +387,7 @@ on:
 
 jobs:
   ci:
-    uses: rarebit-one/.github/.github/workflows/reusable-gem-ci.yml@v1
+    uses: rarebit-one/.github/.github/workflows/reusable-gem-ci.yml@v3
     with:
       lint-cache-paths: |
         ~/.cache/rubocop_cache
@@ -433,7 +433,7 @@ on:
 
 jobs:
   release:
-    uses: rarebit-one/.github/.github/workflows/reusable-gem-release.yml@v2
+    uses: rarebit-one/.github/.github/workflows/reusable-gem-release.yml@v3
     with:
       gem-name: standard_id
 ```
@@ -454,7 +454,7 @@ on:
 
 jobs:
   release:
-    uses: rarebit-one/.github/.github/workflows/reusable-gem-release.yml@v2
+    uses: rarebit-one/.github/.github/workflows/reusable-gem-release.yml@v3
     with:
       gem-name: ground_control-inertia
       sibling-checkouts: |
@@ -521,7 +521,7 @@ on:
 
 jobs:
   release:
-    uses: rarebit-one/.github/.github/workflows/reusable-maven-central-release.yml@v1
+    uses: rarebit-one/.github/.github/workflows/reusable-maven-central-release.yml@v3
     with:
       project-name: ktor-armour
     permissions:
@@ -541,7 +541,7 @@ on:
 
 jobs:
   release:
-    uses: rarebit-one/.github/.github/workflows/reusable-maven-central-release.yml@v1
+    uses: rarebit-one/.github/.github/workflows/reusable-maven-central-release.yml@v3
     with:
       project-name: my-jvm-lib
       publish-runs-on: ubuntu-latest
@@ -1106,9 +1106,11 @@ hygiene; storage overage is $0.02/GiB and is not the reason.
 
 ## Versioning
 
-The `v2` tag is a moving major-version pointer. Backwards-compatible changes
-land on `v2`; breaking input changes will publish under `v3`. Pin to a SHA if
-you need stricter immutability.
+The `v3` tag is a moving major-version pointer: `advance-major-tag.yml` moves it
+to `main` on every push, so merged changes reach callers on their next run.
+Breaking input changes would publish under a new major (`v4`), which freezes
+`v3` where it is. `v1` and `v2` are frozen. Pin to a SHA if you need stricter
+immutability.
 
 ## `reusable-branch-promote.yml` and the shared `/release` skill
 
