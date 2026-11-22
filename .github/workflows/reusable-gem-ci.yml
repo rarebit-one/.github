@@ -24,7 +24,7 @@ on:
         description: 'Ruby version used for the lint job.'
         required: false
         type: string
-        default: '4.0.3'
+        default: '4.0.10'
       lint-cache-paths:
         description: 'Multiline string of paths to cache around the primary lint command (e.g. RuboCop result cache). When set together with lint-cache-key, wraps the lint step with actions/cache.'
         required: false
@@ -130,7 +130,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Ruby
-        uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        uses: ruby/setup-ruby@be3c7df29b3349ec6bcfc6b4792f1cf9f5237d18 # v1.343.0
         with:
           ruby-version: ${{ inputs.lint-ruby-version }}
           bundler-cache: true
@@ -189,7 +189,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Ruby
-        uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        uses: ruby/setup-ruby@be3c7df29b3349ec6bcfc6b4792f1cf9f5237d18 # v1.343.0
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true

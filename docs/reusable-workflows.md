@@ -304,7 +304,7 @@ because the matrix is intentionally skipped.
 | Input                | Type    | Required | Default                          | Description |
 |----------------------|---------|----------|----------------------------------|-------------|
 | `ruby-versions`      | string  | no       | `"[]"`                           | JSON array of Ruby versions for the test matrix, e.g. `'["4.0.0","4.0.3"]'`. When omitted or `'[]'`, the test job is skipped (lint-only). |
-| `lint-ruby-version`  | string  | no       | `"4.0.3"`                        | Ruby version used for the lint job. |
+| `lint-ruby-version`  | string  | no       | `"4.0.10"`                       | Ruby version used for the lint job. |
 | `lint-cache-paths`   | string  | no       | `""`                             | Multiline list of filesystem paths to cache around the lint command (e.g. RuboCop result cache). When set together with `lint-cache-key`, wraps the lint step with `actions/cache@v5`. |
 | `lint-cache-key`     | string  | no       | `""`                             | Cache key paired with `lint-cache-paths`. Required when `lint-cache-paths` is set; ignored otherwise. |
 | `apt-packages`       | string  | no       | `""`                             | Space-separated apt packages installed before the test job. |
@@ -314,7 +314,7 @@ because the matrix is intentionally skipped.
 | `extra-lint-commands`| string  | no       | `""`                             | Multiline shell run after the primary lint command (brakeman, bundler-audit, etc.). |
 | `upload-screenshots` | boolean | no       | `false`                          | When true, upload `tmp/screenshots/` as `screenshots-<ruby>` on test failure. |
 | `concurrency-group`  | string  | no       | `""`                             | Override for the workflow concurrency group. Empty falls back to `<workflow>-<pr-or-ref>`. |
-| `runner-label`       | string  | no       | `ubuntu-latest`                  | Runner for `lint` and `test-matrix`, the jobs that install Ruby. Keep it GitHub-hosted for public callers. Pin an image such as `ubuntu-24.04` when `ubuntu-latest` has no build of a Ruby in the matrix: newer images carry only the latest patch of each series, so on ubuntu-26.04 `4.0.4` fails and only `4.0.9` installs. |
+| `runner-label`       | string  | no       | `ubuntu-latest`                  | Runner for `lint` and `test-matrix`, the jobs that install Ruby. Keep it GitHub-hosted for public callers. Pin an image such as `ubuntu-24.04` when `ubuntu-latest` has no build of a Ruby in the matrix: newer images carry only the latest patch of each series, so on ubuntu-26.04 `4.0.4` fails while `4.0.9` and `4.0.10` install. |
 
 ### Behavior
 
@@ -405,7 +405,7 @@ GitHub Release, and publishes to RubyGems via OIDC trusted publishing.
 | Input               | Type   | Required | Default                          | Description |
 |---------------------|--------|----------|----------------------------------|-------------|
 | `gem-name`          | string | yes      | —                                | Gem name (matches `spec.name`). Also used to derive the default version-file path. |
-| `ruby-version`      | string | no       | `"4.0.3"`                        | Ruby used for verification and publish. |
+| `ruby-version`      | string | no       | `"4.0.10"`                       | Ruby used for verification and publish. |
 | `version-file`      | string | no       | `lib/<gem-name>/version.rb` (with `-` → `/`) | Override the version file location. |
 | `changelog-path`    | string | no       | `CHANGELOG.md`                   | Path to the changelog file. |
 | `sibling-checkouts` | string | no       | `"[]"`                           | JSON array of sibling repos to clone before `bundle install` in the publish job. Each entry: `{"repo": "owner/name", "path": "../name", "ref": "optional"}`. Used by gems whose Gemfile resolves a `path:` dependency on a sibling repo so `bundler-cache: true` can resolve. Authentication uses the workflow's `GITHUB_TOKEN`; sibling repos must be readable by it. |
