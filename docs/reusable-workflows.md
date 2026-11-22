@@ -409,6 +409,7 @@ GitHub Release, and publishes to RubyGems via OIDC trusted publishing.
 | `version-file`      | string | no       | `lib/<gem-name>/version.rb` (with `-` → `/`) | Override the version file location. |
 | `changelog-path`    | string | no       | `CHANGELOG.md`                   | Path to the changelog file. |
 | `sibling-checkouts` | string | no       | `"[]"`                           | JSON array of sibling repos to clone before `bundle install` in the publish job. Each entry: `{"repo": "owner/name", "path": "../name", "ref": "optional"}`. Used by gems whose Gemfile resolves a `path:` dependency on a sibling repo so `bundler-cache: true` can resolve. Authentication uses the workflow's `GITHUB_TOKEN`; sibling repos must be readable by it. |
+| `new-gem-owner`     | string | no       | `""` (falls back to `vars.RUBYGEMS_NEW_GEM_OWNER`) | **First release of a new gem only.** Numeric RubyGems.org account ID (shown on that account's Pending Trusted Publishers page) that will own the gem. RubyGems.org rejects a first trusted-publishing push that doesn't name its owner, and `configure-rubygems-credentials` has no `owner` input yet, so when set the publish job performs the OIDC exchange itself with `owner`. Unset it (or delete the variable) once the gem exists. |
 
 ### Behavior
 
