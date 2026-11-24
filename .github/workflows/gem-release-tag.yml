@@ -159,7 +159,8 @@ jobs:
           printf 'result:%b\n' "${tagged:-\n(nothing to tag)}"
 
       - name: Announce publishes
-        if: ${{ steps.tag.outputs.tagged != '' }}
+        # A dry run tags nothing, so it must not announce a publish.
+        if: ${{ steps.tag.outputs.tagged != '' && !inputs.dry-run }}
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           CHANNEL: ${{ vars.SLACK_RELEASE_CHANNEL_ID }}
