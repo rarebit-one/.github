@@ -64,8 +64,12 @@ jobs:
           for repo in $(gh repo list rarebit-one --limit 100 --json name,isArchived \
                           --jq '.[]|select(.isArchived|not)|.name' | sort); do
             case " $SKIP " in *" $repo "*) continue ;; esac
-            gh api "repos/rarebit-one/$repo/contents" --jq '.[].name' 2>/dev/null \
-              | grep -q '\.gemspec$' || continue
+            # Capture, then match. Never pipe gh into `grep -q` under pipefail: grep
+            # exits on its first match, gh dies of SIGPIPE (141) mid-write, and the
+            # pipeline reads as "no match" — this is what made the guard below
+            # report "no version.rb in tree" for standard_id v0.63.0.
+            names=$(gh api "repos/rarebit-one/$repo/contents" --jq '.[].name' 2>/dev/null) || continue
+            grep -q '\.gemspec$' <<<"$names" || continue
 
             # The tip of main is the merged release PR (squash-merged, so the
             # subject is the PR title).
@@ -88,13 +92,15 @@ jobs:
             # Guard: the commit must actually carry this version. Protects against
             # tagging a revert, or a hand-written commit that merely borrows the
             # subject line.
-            if ! gh api "repos/rarebit-one/$repo/git/trees/$sha?recursive=1" \
-                 --jq '.tree[].path' 2>/dev/null | grep -q 'version\.rb'; then
+            # The tree is fetched once and matched as a string (see the SIGPIPE note
+            # above).
+            paths=$(gh api "repos/rarebit-one/$repo/git/trees/$sha?recursive=1" \
+                      --jq '.tree[].path' 2>/dev/null || true)
+            vfile=$(grep -m1 -E 'lib/.*version\.rb$' <<<"$paths" || true)
+            if [ -z "$vfile" ]; then
               echo "::warning::$repo: no version.rb in tree — not tagging"
               continue
             fi
-            vfile=$(gh api "repos/rarebit-one/$repo/git/trees/$sha?recursive=1" \
-                      --jq '.tree[].path' | grep -E 'lib/.*version\.rb$' | head -1)
             actual=$(gh api "repos/rarebit-one/$repo/contents/$vfile?ref=$sha" --jq '.content' \
                       | base64 -d | sed -nE 's/.*VERSION[[:space:]]*=[[:space:]]*["'"'"']([^"'"'"']+)["'"'"'].*/\1/p' | head -1)
             if [ "$actual" != "$version" ]; then

@@ -75,9 +75,11 @@ jobs:
             for r in $(gh repo list rarebit-one --limit 100 --json name,isArchived \
                         --jq '.[]|select(.isArchived|not)|.name' | sort); do
               case " $SKIP " in *" $r "*) continue ;; esac
-              # A gem repo is one with a .gemspec at its root.
-              gh api "repos/rarebit-one/$r/contents" --jq '.[].name' 2>/dev/null \
-                | grep -q '\.gemspec$' && gems="$gems $r"
+              # A gem repo is one with a .gemspec at its root. Capture, then match:
+              # `gh … | grep -q` under pipefail can read as "no match" when grep
+              # exits first and gh dies of SIGPIPE, silently dropping the gem.
+              names=$(gh api "repos/rarebit-one/$r/contents" --jq '.[].name' 2>/dev/null) || continue
+              grep -q '\.gemspec$' <<<"$names" && gems="$gems $r"
             done
           fi
           echo "gems: $gems"
