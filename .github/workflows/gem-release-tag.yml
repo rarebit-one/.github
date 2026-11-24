@@ -15,6 +15,22 @@ name: Gem release tag
 # next pass, whereas a missed event is gone. The cost is up to an hour of latency
 # on a publish, which is not a latency-sensitive operation.
 #
+# WHY A WINDOW, not just the tip of main: the release PR is often not the last
+# thing to merge before the next hourly pass. When an unrelated PR (an estate
+# sync, a Dependabot bump) lands minutes after a release PR, the tip is no longer
+# the release commit, and a tip-only check skips the release for good. So each
+# pass reads the last WINDOW commits on main and picks the most recent
+# `chore: Release vX.Y.Z` subject, then tags THAT commit's SHA, not the tip.
+# Safety rules for the window:
+#   - Only the MOST RECENT release subject counts. An older release further back
+#     is superseded and is never tagged late, even if it was never tagged.
+#   - If that most recent release is already tagged, the repo is done.
+#   - If a later commit in the window reverts it ("Revert "chore: Release
+#     vX.Y.Z...""), it is not tagged.
+#   - The version guard reads lib/**/version.rb from the release commit's own
+#     tree, not the tip's.
+# WINDOW only has to cover what merges in the hour between passes.
+#
 # The tag is created with the release-bot App token, NOT GITHUB_TOKEN: pushes made
 # with GITHUB_TOKEN deliberately do not trigger further workflows, which would
 # leave the tag sitting there with release.yml never firing. App installation
@@ -58,6 +74,7 @@ jobs:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
           SKIP: 'ground_control-api ground_control-inertia rarebit-static-v2 ktor-armour'
+          WINDOW: '10'   # commits on main to look back over (see the header)
         run: |
           set -euo pipefail
           tagged=''
@@ -71,11 +88,19 @@ jobs:
             names=$(gh api "repos/rarebit-one/$repo/contents" --jq '.[].name' 2>/dev/null) || continue
             grep -q '\.gemspec$' <<<"$names" || continue
 
-            # The tip of main is the merged release PR (squash-merged, so the
-            # subject is the PR title).
-            read -r sha subject < <(gh api "repos/rarebit-one/$repo/commits/HEAD" \
-              --jq '"\(.sha) \(.commit.message | split("\n")[0])"' 2>/dev/null || echo " ")
-            [ -n "${sha:-}" ] || continue
+            # The last WINDOW commits on main, newest first, as "sha subject"
+            # (squash-merged, so a release PR's subject is its title).
+            commits=$(gh api "repos/rarebit-one/$repo/commits?per_page=$WINDOW" \
+              --jq '.[] | "\(.sha) \(.commit.message | split("\n")[0])"' 2>/dev/null) || continue
+
+            # The most recent release subject in the window, and only that one: an
+            # older release behind it is superseded and must never be tagged late.
+            # The match is deliberately loose ("chore: Release v" + anything), so a
+            # malformed newer release subject still shadows an older valid one and
+            # the semver check below skips the repo rather than reaching back.
+            release=$(grep -m1 -E '^[0-9a-f]{40} chore: Release v' <<<"$commits" || true)
+            [ -n "$release" ] || continue
+            read -r sha subject <<<"$release"
 
             # Capture ONLY the semver. A squash merge appends the PR number to the
             # subject ("chore: Release v0.2.0 (#29)"), so a trailing `.*` inside the
@@ -87,6 +112,14 @@ jobs:
 
             if gh api "repos/rarebit-one/$repo/git/ref/tags/v$version" >/dev/null 2>&1; then
               continue   # already tagged — normal on every pass after the first
+            fi
+
+            # A newer commit in the window that reverts this release means it was
+            # backed out; the revert's subject quotes the release subject.
+            newer=$(sed -n "/^$sha /q;p" <<<"$commits")
+            if grep -qF "Revert \"chore: Release v$version" <<<"$newer"; then
+              echo "::warning::$repo: v$version was reverted on main — not tagging"
+              continue
             fi
 
             # Guard: the commit must actually carry this version. Protects against
@@ -108,7 +141,7 @@ jobs:
               continue
             fi
 
-            echo "$repo: tagging v$version at ${sha:0:8}"
+            echo "$repo: tagging v$version at ${sha:0:8}$( [ "$sha" = "${commits%% *}" ] || echo " (not the tip of main)")"
             if [ "$DRY_RUN" = "true" ]; then
               tagged="$tagged\n• $repo v$version (dry-run)"
               continue
