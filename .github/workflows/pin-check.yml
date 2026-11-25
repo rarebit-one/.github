@@ -56,7 +56,9 @@ on:
           REQUIRED for public callers: the estate's self-hosted runner groups
           carry `allows_public_repositories: false`, so a public repo pointed at
           one has its job refused and it queues forever with nothing red. Private
-          callers pass their homelab label (e.g. `hyperion`).
+          callers pass their homelab label (e.g. `jdb`). It is one label, passed
+          straight to `runs-on`, so a JSON array does not work here. The old
+          `hyperion` label is retired and routes nothing.
         type: string
         default: 'ubuntu-latest'
       zizmor-version:
