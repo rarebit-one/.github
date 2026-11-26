@@ -69,18 +69,6 @@ on:
         required: false
         type: string
         default: '[]'
-    secrets:
-      slack-bot-token:
-        description: >-
-          Slack bot token (xoxb-…) with chat:write, used to narrate the release
-          to #releases as a thread. OPTIONAL and fail-soft: when absent (caller
-          does not pass `secrets: inherit` or this secret), the narration steps
-          no-op and the release runs exactly as before. Reusable workflows do
-          NOT auto-inherit caller secrets, so a caller must opt in with
-          `secrets: inherit` (or `secrets: { slack-bot-token: ... }`) for this
-          to light up. Pairs with the caller's `vars.SLACK_RELEASE_CHANNEL_ID`
-          org variable (resolved in the caller's context).
-        required: false
 
 jobs:
   release:
@@ -173,25 +161,6 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # ── Slack narration: thread root ──────────────────────────────────
-      # Posts the start-of-release message and captures its `thread_ts`, so the
-      # outcome reply below threads under it. Fail-soft: with no token/channel
-      # the composite no-ops and the release proceeds untouched. The full ref
-      # (rarebit-one/.github/.github/actions/...@main) is required because a
-      # reusable workflow resolves `uses: ./...` against the CALLER, not this
-      # repo. Use the @main moving ref (same as the vendored composite's source).
-      - name: Slack — gem release started
-        id: slack
-        continue-on-error: true
-        uses: rarebit-one/.github/.github/actions/slack-deploy-thread@main
-        with:
-          bot_token: ${{ secrets.slack-bot-token }}
-          channel: ${{ vars.SLACK_RELEASE_CHANNEL_ID }}
-          mode: start
-          text: |
-            💎 *Gem release started* — `${{ github.repository }}` ${{ github.ref_name }}
-            <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>
 
       - name: Clone sibling repositories
         if: ${{ inputs.sibling-checkouts != '' && inputs.sibling-checkouts != '[]' }}
@@ -289,22 +258,33 @@ jobs:
           GEM_NAME: ${{ inputs.gem-name }}
         run: gem push "${GEM_NAME}"-*.gem
 
-      # ── Slack narration: outcome reply ────────────────────────────────
-      # Always runs so a failure is narrated too. Threads under the root via the
-      # `thread_ts` captured above; an empty thread_ts (root skipped/failed)
-      # makes the composite no-op. job.status is success only if every prior
-      # step (incl. publish) passed. Fail-soft via continue-on-error.
-      - name: Slack — gem release outcome
-        if: always()
-        continue-on-error: true
-        uses: rarebit-one/.github/.github/actions/slack-deploy-thread@main
-        with:
-          bot_token: ${{ secrets.slack-bot-token }}
-          channel: ${{ vars.SLACK_RELEASE_CHANNEL_ID }}
-          mode: reply
-          thread_ts: ${{ steps.slack.outputs.thread_ts }}
-          text: |
-            ${{ job.status == 'success'
-              && format('✅ *Published to RubyGems* — `{0} {1}`', inputs.gem-name, github.ref_name)
-              || format('🔴 *Gem release failed* — `{0}` {1}', github.repository, github.ref_name) }}
-            <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>
+  # Outcome goes to the run summary. A failed release also surfaces in Rarebit
+  # HQ's decisions feed, which reads the latest release.yml run on a v* tag, so
+  # a failure never goes silent.
+  summary:
+    needs: [release, publish]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Write release outcome to the run summary
+        env:
+          GEM_NAME: ${{ inputs.gem-name }}
+          TAG: ${{ github.ref_name }}
+          RELEASE_RESULT: ${{ needs.release.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+        run: |
+          if [ "$PUBLISH_RESULT" = "success" ]; then
+            echo "### Published \`${GEM_NAME}\` \`${TAG}\` to RubyGems" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### Gem release failed: \`${GEM_NAME}\` \`${TAG}\`"
+              echo ""
+              echo "| Job | Result |"
+              echo "|---|---|"
+              echo "| GitHub Release | ${RELEASE_RESULT} |"
+              echo "| RubyGems publish | ${PUBLISH_RESULT} |"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Gem release ${TAG} did not publish (release=${RELEASE_RESULT}, publish=${PUBLISH_RESULT})"
+          fi
