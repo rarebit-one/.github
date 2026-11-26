@@ -18,13 +18,13 @@
 # Majors are never touched: they are not approved by the per-PR gate, so the
 # APPROVED filter skips them. DRY_RUN=true logs decisions, changes nothing.
 #
-# NARRATION: the sweep also writes a Slack-ready digest to $NARRATION_FILE and
-# emits counts to $GITHUB_OUTPUT, so the workflow can report what it merged and
-# surface the human-gated backlog. Nothing here posts to Slack — that is the
-# workflow's job; this script stays runnable locally with no Slack dependency.
+# NARRATION: the sweep also writes a digest to $NARRATION_FILE and emits counts
+# to $GITHUB_OUTPUT, so the workflow can report what it merged and surface the
+# human-gated backlog in the run summary. Nothing here posts anywhere; the
+# script stays runnable locally.
 set -euo pipefail
 ORG="${ORG:?set ORG}"; DRY_RUN="${DRY_RUN:-true}"
-# Written by this script, read by the workflow's Slack step. The workflow passes
+# Written by this script, read by the workflow's run-summary step. The workflow passes
 # an explicit absolute path in env so the two steps can never disagree about it
 # (a previously-shipped narrated workflow posted false failures when a producer
 # and a consumer step assumed different temp paths).

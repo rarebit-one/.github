@@ -158,27 +158,13 @@ jobs:
           fi
           printf 'result:%b\n' "${tagged:-\n(nothing to tag)}"
 
-      - name: Announce publishes
-        # A dry run tags nothing, so it must not announce a publish.
-        if: ${{ steps.tag.outputs.tagged != '' && !inputs.dry-run }}
+      - name: Record tags in run summary
+        if: ${{ steps.tag.outputs.tagged != '' }}
         env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          CHANNEL: ${{ vars.SLACK_RELEASE_CHANNEL_ID }}
           TAGGED: ${{ steps.tag.outputs.tagged }}
         run: |
           set -euo pipefail
-          if [ -z "${SLACK_BOT_TOKEN:-}" ] || [ -z "${CHANNEL:-}" ]; then
-            echo "::warning::Slack not configured — skipping."; exit 0
-          fi
-          TEXT=$(printf ':label: *Gem release tagged* — publishing to RubyGems now\n%s' "$TAGGED")
-          RESP=$(curl -fsS -X POST https://slack.com/api/chat.postMessage \
-            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-            -H 'Content-type: application/json; charset=utf-8' \
-            -d "$(jq -n --arg c "$CHANNEL" --arg t "$TEXT" '{channel:$c, text:$t, unfurl_links:false}')") \
-            || { echo "::warning::Slack request failed."; exit 0; }
-          [ "$(jq -r '.ok' <<<"$RESP")" = "true" ] \
-            && echo "posted." \
-            || echo "::warning::Slack post failed: $(jq -r '.error // "unknown"' <<<"$RESP")"
+          { echo "### Gem release tagged (publishing via each gem's release.yml)"; echo; printf '%s\n' "$TAGGED"; } >> "$GITHUB_STEP_SUMMARY"
 
   alert:
     needs: [tag]

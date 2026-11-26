@@ -255,43 +255,8 @@ jobs:
             --title "chore: Release v$NEXT" --body "$body"
           echo "prepped=$GEM v$NEXT ($BUMP)" >> "$GITHUB_OUTPUT"
 
-  narrate:
-    name: Narrate
-    needs: [discover, prep]
-    if: ${{ always() && !cancelled() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Post Slack summary
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          CHANNEL: ${{ vars.SLACK_RELEASE_CHANNEL_ID }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          PREPPED: ${{ needs.prep.outputs.prepped }}
-        run: |
-          set -euo pipefail
-          # Silent unless a release was actually prepped. Most weeks nothing is
-          # release-worthy, and a weekly "nothing to do" post is exactly the kind
-          # of noise that gets a channel muted.
-          if [ -z "${PREPPED:-}" ]; then
-            echo "nothing prepped — no post."; exit 0
-          fi
-          if [ -z "${SLACK_BOT_TOKEN:-}" ] || [ -z "${CHANNEL:-}" ]; then
-            echo "::warning::Slack not configured — skipping."; exit 0
-          fi
-          TEXT=$(printf ':package: *Gem release prepped* — review and merge to publish\n%s\n<%s|run log>' "$PREPPED" "$RUN_URL")
-          RESP=$(curl -fsS -X POST https://slack.com/api/chat.postMessage \
-            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-            -H 'Content-type: application/json; charset=utf-8' \
-            -d "$(jq -n --arg c "$CHANNEL" --arg t "$TEXT" \
-                  '{channel:$c, text:$t, unfurl_links:false}')") \
-            || { echo "::warning::Slack request failed."; exit 0; }
-          [ "$(jq -r '.ok' <<<"$RESP")" = "true" ] \
-            && echo "posted." \
-            || echo "::warning::Slack post failed: $(jq -r '.error // "unknown"' <<<"$RESP")"
-
   alert:
-    needs: [discover, prep, narrate]
+    needs: [discover, prep]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     # Runaway-hang cap. A single gh issue list/create/close notify step; finishes in

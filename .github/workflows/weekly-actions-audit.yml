@@ -21,8 +21,9 @@ name: Weekly Actions Audit
 # budget) and every fix an auditable work unit. Nothing here merges (rule #7).
 #
 # Kept from the prior design: the deterministic audit.py/recommendations.py scan,
-# the actions/cache week-over-week deltas, marker-based issue dedup, and the Slack
-# digest. SHA-pinned third-party actions throughout.
+# the actions/cache week-over-week deltas and marker-based issue dedup. The digest
+# goes to the run summary (the Slack digest was retired on 2026-11-26). SHA-pinned
+# third-party actions throughout.
 
 on:
   schedule:
@@ -237,18 +238,11 @@ jobs:
           if-no-files-found: ignore
           retention-days: 90
 
-      # ----- Slack digest to #octo-internal (engineering-internal, NOT #octo) -----
+      # ----- digest (run summary) -----
 
-      - name: Post Slack digest
+      - name: Record digest in run summary
         if: ${{ always() }}
         env:
-          # Bot-token path (chat.postMessage) — reuses the org SLACK_BOT_TOKEN the
-          # brains post with, rather than a per-channel Incoming Webhook. Requires
-          # the "Sidekick Brains" bot invited to the (private) #octo-internal and
-          # .github added to SLACK_BOT_TOKEN's selected-repo scope.
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          OCTO_INTERNAL_CHANNEL: C0BBB2NRNN6   # #observability
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           JUDG_COUNT: ${{ steps.recs.outputs.judgment_count }}
           DIGEST_COUNT: ${{ steps.recs.outputs.digest_count }}
           FP_COUNT: ${{ steps.recs.outputs.fp_count }}
@@ -257,29 +251,14 @@ jobs:
           DRY_RUN: ${{ inputs.dry-run }}
         run: |
           set -euo pipefail
-          if [ -z "${SLACK_BOT_TOKEN:-}" ] || [ -z "${OCTO_INTERNAL_CHANNEL:-}" ]; then
-            echo "::warning::SLACK_BOT_TOKEN or OCTO_INTERNAL_CHANNEL not set — skipping Slack digest (run summary still has the report)."
-            exit 0
-          fi
           MODE="live"
-          [ "${DRY_RUN:-false}" = "true" ] && MODE="DRY-RUN (no issues)"
-
-          TEXT=$(printf ':broom: *Weekly Actions Audit* (sensor, %s)\n*Run:* %s\nIssue-worthy: %s · Digest-only: %s · False positives skipped: %s\n*ci-audit issues opened:* %s · *reconcile closed:* %s\n\nFixes are opened by the `ci-fix` actuator in sre-brain (sre-brain#109); low-severity findings stay in this digest, not the tracker.' \
-            "$MODE" "$RUN_URL" "${JUDG_COUNT:-0}" "${DIGEST_COUNT:-0}" "${FP_COUNT:-0}" "${ISSUE_COUNT:-0}" "${CLOSED_COUNT:-0}")
-
-          # chat.postMessage returns HTTP 200 even on logical errors (e.g.
-          # not_in_channel) — so don't rely on curl -f; parse `.ok`.
-          RESP=$(curl -fsS -X POST https://slack.com/api/chat.postMessage \
-            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-            -H 'Content-type: application/json; charset=utf-8' \
-            -d "$(jq -n --arg c "$OCTO_INTERNAL_CHANNEL" --arg t "$TEXT" \
-                  '{channel:$c, text:$t, unfurl_links:false, unfurl_media:false}')") \
-            || { echo "::warning::Slack request failed (network/HTTP)."; exit 0; }
-          if [ "$(printf '%s' "$RESP" | jq -r '.ok')" = "true" ]; then
-            echo "Posted Slack digest to $OCTO_INTERNAL_CHANNEL."
-          else
-            echo "::warning::Slack post failed: $(printf '%s' "$RESP" | jq -r '.error // "unknown"')"
-          fi
+          [ "${DRY_RUN:-false}" = "true" ] && MODE="dry-run (no issues)"
+          {
+            echo "### Weekly Actions Audit (${MODE})"
+            echo
+            echo "Issue-worthy: ${JUDG_COUNT:-0} · digest-only: ${DIGEST_COUNT:-0} · false positives skipped: ${FP_COUNT:-0}"
+            echo "ci-audit issues opened: ${ISSUE_COUNT:-0} · reconcile closed: ${CLOSED_COUNT:-0}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   alert:
     needs: [audit]
