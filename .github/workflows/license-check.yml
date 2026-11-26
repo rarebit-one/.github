@@ -6,7 +6,7 @@ name: license-check
 # exceptions (each needs a reason). Reads lockfiles and public registry metadata
 # (rubygems.org, deps.dev) only; installs and builds nothing; needs no paid feature.
 #
-# BLOCKING since 2026-11-25: the default `enforce` mode fails the job when any
+# BLOCKING since 2026-11-27: the default `enforce` mode fails the job when any
 # licence is blocked (warn and review items stay in the summary and never fail).
 # It shipped report-only on 2026-11-10 and was switched after two quiet weeks,
 # as the owner agreed on 2026-11-11. Pass `mode: report` for a non-blocking run.
@@ -28,7 +28,7 @@ on:
   workflow_call:
     inputs:
       mode:
-        description: "enforce (fail when a licence is blocked; the default since 2026-11-25) or report (summary only, never fails)"
+        description: "enforce (fail when a licence is blocked; the default since 2026-11-27) or report (summary only, never fails)"
         type: string
         default: enforce
       path:
