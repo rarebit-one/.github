@@ -41,3 +41,6 @@ jobs:
       # Pins the operator's live-spec edit (do-spec-edit.sh: GET -> jq -> PUT
       # -> the same drift check) against a stub DO API.
       - run: bash tests/do-spec-edit.test.sh
+      # Pins the hq-push composite: never fails the job, no-ops without a key,
+      # sends HQ's JSON, reports ok/sent (curl stubbed).
+      - run: bash tests/hq-push-action.test.sh

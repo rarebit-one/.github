@@ -1,0 +1,111 @@
+name: HQ push
+description: >-
+  Send a notification to Rarebit HQ, which delivers it to the owner's installed
+  HQ app as a Web Push notification. One POST to `<endpoint>` with a push key.
+
+  SOFT-DEGRADE BY DESIGN: this action NEVER exits non-zero. A run must not fail
+  because HQ was unreachable or push isn't configured. When `key` is empty it
+  no-ops (the workflow runs exactly as before). Any refusal or network error
+  emits a `::warning::`, sets `ok=false`, and returns.
+
+  HQ dedupes by `id` for a few hours, so a re-run does not notify twice; use a
+  stable id per alert (e.g. `deploy:<repo>:prod`), not a run number.
+
+inputs:
+  key:
+    description: >-
+      HQ push key (scope hq-push), usually secrets.HQ_PUSH_KEY. Empty → this
+      action no-ops. Composite actions can't read secrets.*, so the caller
+      passes it in.
+    required: false
+    default: ""
+  id:
+    description: "Stable alert id: 1-120 of [A-Za-z0-9._:/@#+-], starting with a letter or digit."
+    required: true
+  title:
+    description: "Notification title, 1-120 characters."
+    required: true
+  body:
+    description: "Notification text, at most 500 characters. No long digit runs (9+): put run ids in url."
+    required: false
+    default: ""
+  url:
+    description: "Opened on tap: an https:// link, or a path on HQ. Defaults to this workflow run."
+    required: false
+    default: ""
+  severity:
+    description: "fail | overdue | due | upcoming | info | ok. fail and overdue are delivered urgently; fail stays on screen."
+    required: false
+    default: info
+  endpoint:
+    description: "The HQ send endpoint."
+    required: false
+    default: https://hq.rarebit.one/api/push
+
+outputs:
+  ok:
+    description: '"true" when HQ accepted the message (including a dedupe), "false" otherwise (incl. no-op).'
+    value: ${{ steps.send.outputs.ok }}
+  sent:
+    description: "How many devices it reached (0 on no-op, dedupe or failure)."
+    value: ${{ steps.send.outputs.sent }}
+
+runs:
+  using: composite
+  steps:
+    - name: Send to HQ
+      id: send
+      shell: bash
+      env:
+        KEY: ${{ inputs.key }}
+        ID: ${{ inputs.id }}
+        TITLE: ${{ inputs.title }}
+        BODY: ${{ inputs.body }}
+        URL: ${{ inputs.url }}
+        SEVERITY: ${{ inputs.severity }}
+        ENDPOINT: ${{ inputs.endpoint }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        set -uo pipefail
+        emit() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
+
+        if [ -z "$KEY" ]; then
+          echo "::notice::hq-push: key not set, skipping"
+          emit ok false; emit sent 0; exit 0
+        fi
+        if [ -z "$ID" ] || [ -z "$TITLE" ]; then
+          echo "::warning::hq-push: id and title are required, skipping"
+          emit ok false; emit sent 0; exit 0
+        fi
+
+        PAYLOAD=$(jq -n --arg id "$ID" --arg title "$TITLE" --arg body "$BODY" \
+          --arg url "${URL:-$RUN_URL}" --arg severity "${SEVERITY:-info}" \
+          '{id: $id, title: $title, body: $body, url: $url, severity: $severity}')
+
+        ERRF="$(mktemp)"
+        RESP="$(mktemp)"
+        STATUS=$(curl -sS --max-time 20 -o "$RESP" -w '%{http_code}' -X POST "$ENDPOINT" \
+          -H "Authorization: Bearer ${KEY}" \
+          -H "Content-Type: application/json" \
+          --data "$PAYLOAD" 2>"$ERRF") || {
+            echo "::warning::hq-push: request failed: $(cat "$ERRF" 2>/dev/null || echo unknown)"
+            rm -f "$ERRF" "$RESP"
+            emit ok false; emit sent 0; exit 0
+          }
+
+        OK=$(jq -r 'if .ok == true then "true" else "false" end' "$RESP" 2>/dev/null || echo false)
+        SENT=$(jq -r '.sent // 0' "$RESP" 2>/dev/null || echo 0)
+        case "$SENT" in ''|*[!0-9]*) SENT=0 ;; esac
+        if [ "$STATUS" != 200 ] || [ "$OK" != true ]; then
+          ERR=$(jq -r '.error // empty' "$RESP" 2>/dev/null)
+          echo "::warning::hq-push: HQ answered ${STATUS}${ERR:+: ${ERR}}"
+          rm -f "$ERRF" "$RESP"
+          emit ok false; emit sent 0; exit 0
+        fi
+        if [ "$(jq -r '.deduped // false' "$RESP" 2>/dev/null)" = true ]; then
+          echo "hq-push: ${ID} was already sent recently (deduped)"
+        else
+          echo "hq-push: ${ID} reached ${SENT} device(s)"
+        fi
+        rm -f "$ERRF" "$RESP"
+        emit ok true; emit sent "$SENT"
